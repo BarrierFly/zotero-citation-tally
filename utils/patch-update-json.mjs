@@ -13,14 +13,14 @@ import process from 'node:process'
 const LEGACY_ENTRIES = [
   {
     version: '0.0.12',
-    update_link: 'https://github.com/daeh/zotero-citation-tally/releases/download/v0.0.12/citation-tally.xpi',
+    update_link: 'https://github.com/BarrierFly/zotero-citation-tally/releases/download/v0.0.12/citation-tally.xpi',
     applications: {
       zotero: { strict_min_version: '7.999', strict_max_version: '8.*' },
     },
   },
   {
     version: '0.0.11',
-    update_link: 'https://github.com/daeh/zotero-citation-tally/releases/download/v0.0.11/citation-tally.xpi',
+    update_link: 'https://github.com/BarrierFly/zotero-citation-tally/releases/download/v0.0.11/citation-tally.xpi',
     applications: {
       zotero: { strict_min_version: '6.999', strict_max_version: '7.*' },
     },

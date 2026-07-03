@@ -8,7 +8,7 @@ function getPrefsString(key: string): string {
     'pref-database-valid': 'Valid database configuration',
     'pref-database-duplicate': 'Duplicate databases found',
     'pref-database-invalid': 'Invalid database(s): %s',
-    'pref-database-count': 'Please enter 1-3 databases',
+    'pref-database-count': 'Please enter 1-4 databases',
     'pref-database-empty': 'Please enter at least one database',
   }
   return strings[key] || key
@@ -105,7 +105,7 @@ interface Validation {
 }
 
 export function validateDatabaseOrderValue(inputValue: string, andSave: boolean = true): Validation {
-  const validDatabases = ['crossref', 'semanticscholar', 'inspire']
+  const validDatabases = ['crossref', 'semanticscholar', 'inspire', 'openalex']
 
   // Parse comma-separated values
   const databases = inputValue
@@ -125,8 +125,8 @@ export function validateDatabaseOrderValue(inputValue: string, andSave: boolean 
     return { valid: false, message: getPrefsString('pref-database-invalid').replace('%s', invalidDatabases.join(', ')) }
   }
 
-  // Check length (1-3 databases)
-  if (databases.length === 0 || databases.length > 3) {
+  // Check length (1-4 databases)
+  if (databases.length === 0 || databases.length > 4) {
     return { valid: false, message: getPrefsString('pref-database-count') }
   }
 

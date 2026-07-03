@@ -1,11 +1,11 @@
 pref-title = Citation Tally
 pref-citation-databases = Citation Databases (order matters for display)
-pref-database-instructions = Enter 1-3 databases separated by commas: crossref, semanticscholar, inspire
+pref-database-instructions = Enter 1-4 databases separated by commas: crossref, semanticscholar, inspire, openalex
 pref-validate-button = Validate
 pref-database-empty = Please enter at least one database
 pref-database-duplicate = Duplicate databases found
 pref-database-invalid = Invalid database(s): %s
-pref-database-count = Please enter 1-3 databases
+pref-database-count = Please enter 1-4 databases
 pref-database-valid = ✓ Valid database configuration
 pref-fetch-on-add = Fetch tallies for new items
 pref-fetch-on-add-enabled = Fetch tallies when items are added

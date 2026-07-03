@@ -103,6 +103,7 @@ function getOperationName(key: string): string {
     crossref: 'database-crossref',
     inspire: 'database-inspire',
     semanticscholar: 'database-semanticscholar',
+    openalex: 'database-openalex',
   } as const
   const fluentId = nameMap[key as keyof typeof nameMap]
   return fluentId ? getString(fluentId) : key
@@ -175,6 +176,10 @@ function isCitationDataOutdated(item: Zotero.Item): [boolean, string] {
       // INSPIRE works with DOI, arXiv, and arXiv DOIs
       return identifierType === 'doi' || identifierType === 'arxiv'
     }
+    if (database === 'openalex') {
+      // OpenAlex only supports DOIs
+      return identifierType === 'doi' && !isArxivDoi
+    }
     return false
   }
 
@@ -204,31 +209,33 @@ function isCitationDataOutdated(item: Zotero.Item): [boolean, string] {
 
     checkableDatabases++
 
-    // Look for citation data for this specific database
+    // Look for citation data for this specific database — find the latest date
     const dbTitle = getOperationName(database)
     const patt_date = new RegExp(`^Citations: *\\d+ *\\(${dbTitle}\\) *\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\]`, 'i')
 
     const lines = extra.split('\n')
-    let found = false
+    let latestDate: string | null = null
 
     for (const line of lines) {
       const match = patt_date.exec(line)
-      if (match) {
-        const citationDate = new Date(match[1])
-        const daysDiff = Math.floor((new Date().getTime() - citationDate.getTime()) / (1000 * 3600 * 24))
-
-        if (citationDate < cutoffDate) {
-          reasons.push(`${database}_outdated_${match[1]}_${daysDiff}days`)
-          hasAnyCheckableOutdatedData = true
-        } else {
-          reasons.push(`${database}_recent_${match[1]}_${daysDiff}days`)
+      if (match?.[1]) {
+        if (!latestDate || match[1] > latestDate) {
+          latestDate = match[1]
         }
-        found = true
-        break
       }
     }
 
-    if (!found) {
+    if (latestDate) {
+      const citationDate = new Date(latestDate)
+      const daysDiff = Math.floor((new Date().getTime() - citationDate.getTime()) / (1000 * 3600 * 24))
+
+      if (citationDate < cutoffDate) {
+        reasons.push(`${database}_outdated_${latestDate}_${daysDiff}days`)
+        hasAnyCheckableOutdatedData = true
+      } else {
+        reasons.push(`${database}_recent_${latestDate}_${daysDiff}days`)
+      }
+    } else {
       reasons.push(`${database}_no_data`)
       hasAnyCheckableOutdatedData = true
     }

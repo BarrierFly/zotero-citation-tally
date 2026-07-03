@@ -6,6 +6,7 @@ const DEFAULT_RATE_LIMITS: Record<string, number> = {
   crossref: 1000,
   inspire: 1000,
   semanticscholar: 3000,
+  openalex: 1000,
 }
 
 const MAX_RATE_LIMIT_MULTIPLIER = 10
@@ -89,6 +90,7 @@ interface LookupResult {
   count: number
   status: 'success' | 'not_found' | 'api_error' | 'no_identifier' | 'rate_limited'
   message?: string
+  fwci?: number // Field-Weighted Citation Impact (OpenAlex)
 }
 
 class IgnoredItemsManager {
@@ -299,6 +301,7 @@ function getOperationName(key: string): string {
     crossref: 'database-crossref',
     inspire: 'database-inspire',
     semanticscholar: 'database-semanticscholar',
+    openalex: 'database-openalex',
   } as const
   const fluentId = nameMap[key as keyof typeof nameMap]
   return fluentId ? getString(fluentId) : key
@@ -309,13 +312,15 @@ const databaseColorsDark: Record<string, string> = {
   crossref: '#1a73e8', // Blue
   inspire: '#0f9d58', // Green
   semanticscholar: '#ea4335', // Red
+  openalex: '#9334e6', // Purple
 }
 
 // Database colors for light theme (higher contrast)
 const databaseColorsLight: Record<string, string> = {
   crossref: '#000000', // Black
   inspire: '#0f9d58', // Green
-  semanticscholar: '#cc0000', // Red
+  semanticscholar: '#cc0000', // Dark Red
+  openalex: '#6a0dad', // Dark Purple
 }
 
 /**
@@ -466,6 +471,10 @@ function insertBeforeMatch(arr: string[], pattern: RegExp, newItem: string): voi
   }
 }
 
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 class Helpers {
   /**
    * Get all possible identifiers from item (for fallback when primary fails)
@@ -569,6 +578,7 @@ class Helpers {
 interface CountInfo {
   title: string // Database tag (e.g., 'crossref')
   count: number // Citation count
+  fwci?: number // Field-Weighted Citation Impact (OpenAlex)
 }
 type CountArray = CountInfo[]
 
@@ -590,41 +600,6 @@ class Core {
 
     const extras = extra.split('\n')
 
-    const dbTitles: string[] = data.map((d) => d.title.trim())
-
-    const titlePattern = `(?:${dbTitles.join('|')})`
-
-    const patt_this = new RegExp(`^Citations: *\\d+ *\\(${titlePattern}\\) *\\[\\d{4}-\\d{1,2}-\\d{1,2}\\]`, 'i') ///REGEXP
-
-    const patt0 = new RegExp(`^Citation *Count: *\\d+ *\\(${titlePattern}\\) *\\[\\d{4}-\\d{1,2}-\\d{1,2}\\]`, 'i')
-    const patt1 = new RegExp(`^Citations \\(${titlePattern}\\): \d+`, 'i')
-    const patt2 = new RegExp(`^\\d+ citations \\(${titlePattern}\\)`, 'i')
-    const patt3 = new RegExp(`^\\d+ citations \\(${titlePattern}\\) \\[\\d{4}-\\d{1,2}-\\d{1,2}\\]`, 'i')
-    const patt_old = new RegExp(
-      '^\\d+ citations \\((?:Crossref\\/DOI|Inspire\\/DOI|Inspire\\/arXiv|Semantic Scholar\\/DOI|Semantic Scholar\\/arXiv)\\) \\[\\d{4}-\\d{1,2}-\\d{1,2}\\]',
-      'i',
-    )
-
-    const patterns: RegExp[] = [patt_this, patt0, patt1, patt2, patt3, patt_old]
-
-    // Remove old lines that match any of the patterns
-    const filteredExtras: string[] = extras.filter((line) => {
-      // const matches = patt0.test(ex) || patt1.test(ex) || patt2.test(ex) || patt3.test(ex) || patt_old.test(ex)
-      let match = false
-
-      for (const pattern of patterns) {
-        if (pattern.test(line)) {
-          match = true
-          break
-        }
-      }
-
-      if (match) {
-        ztoolkit.log('Citation debug - Removing old entry:', line)
-      }
-      return !match
-    })
-
     // Format date
     const today = new Date()
     const dd = String(today.getDate()).padStart(2, '0')
@@ -632,21 +607,41 @@ class Core {
     const yyyy = today.getFullYear()
     const date = `${yyyy}-${mm}-${dd}`
 
-    // Add new counts
-    for (const { title, count } of data) {
+    let modified = false
+
+    // Append-only: never remove existing lines, only skip exact duplicates
+    for (const { title, count, fwci } of data) {
       const newEntry = `Citations: ${count} (${title}) [${date}]` ///REGEXP
 
-      // Insert as low as possible but before the BBT citation
-      const bbtcitekeypattern = new RegExp('^Citation Key: \\S+', 'i')
-      insertBeforeMatch(filteredExtras, bbtcitekeypattern, newEntry)
-      ztoolkit.log('Citation debug - Added new entry:', newEntry)
+      if (!extras.includes(newEntry)) {
+        // Insert at the top of the Extra field
+        extras.unshift(newEntry)
+        modified = true
+        ztoolkit.log('Citation debug - Prepended entry:', newEntry)
+      } else {
+        ztoolkit.log('Citation debug - Skipping exact duplicate:', newEntry)
+      }
+
+      // Store FWCI if available (OpenAlex-specific)
+      if (fwci !== undefined && fwci !== null && !isNaN(fwci)) {
+        const fwciEntry = `FWCI: ${Number(fwci).toFixed(2)} (${title}) [${date}]` ///REGEXP
+        if (!extras.includes(fwciEntry)) {
+          // Insert at the top of the Extra field
+          extras.unshift(fwciEntry)
+          modified = true
+          ztoolkit.log('Citation debug - Prepended FWCI entry:', fwciEntry)
+        } else {
+          ztoolkit.log('Citation debug - Skipping exact duplicate FWCI:', fwciEntry)
+        }
+      }
     }
 
-    // Join and set
-    const newExtra = filteredExtras.join('\n')
-    item.setField('extra', newExtra)
-    await item.saveTx()
-    ztoolkit.log('Citation debug - New Extra field:', newExtra)
+    if (modified) {
+      const newExtra = extras.join('\n')
+      item.setField('extra', newExtra)
+      await item.saveTx()
+      ztoolkit.log('Citation debug - Updated Extra field')
+    }
   }
 
   /**
@@ -665,26 +660,66 @@ class Core {
     }
 
     const extras = extra.split('\n')
-    const found: Record<string, number> = {}
 
-    for (const tag_ of operationsIncluded) {
-      found[tag_] = -1 // Initialize with -1 to indicate not found
-    }
+    // For each source, find the entry with the most recent date
+    const latestCounts: Record<string, { count: number; date: string }> = {}
 
-    for (const tag_ of operationsIncluded) {
-      const tagName = getOperationName(tag_)
-      const patt0 = new RegExp(`^Citations: *(\\d+) *\\(${tagName}\\) *\\[\\d{4}-\\d{1,2}-\\d{1,2}\\]`, 'i') ///REGEXP
-      const patt1 = new RegExp(`^Citations: *(\\d+) *\\(${tagName}\\)`, 'i') ///REGEXP
+    for (const tag of operationsIncluded) {
+      const tagName = getOperationName(tag)
+      const escapedTag = escapeRegex(tagName)
 
-      for (const ex of extras) {
-        let match = patt0.exec(ex)
-        if (!match) {
-          match = patt1.exec(ex)
+      // Pattern 1: Current format "Citations: N (SourceName) [YYYY-MM-DD]"
+      const pattNew = new RegExp(
+        `^Citations: *(\\d+) *\\(${escapedTag}\\) *\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\]`, 'i'
+      )
+      // Pattern 2: Current format without date "Citations: N (SourceName)"
+      const pattNewNoDate = new RegExp(
+        `^Citations: *(\\d+) *\\(${escapedTag}\\)`, 'i'
+      )
+      // Pattern 3: Old format "N citations (SourceName/IDType) [YYYY-MM-DD]"
+      const pattOld = new RegExp(
+        `^(\\d+) citations \\(${escapedTag}(?:\\/\\w+)?\\) *(?:\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\])?`, 'i'
+      )
+      // Pattern 4: Very old format "Citations (SourceName): N"
+      const pattVeryOld = new RegExp(
+        `^Citations \\(${escapedTag}\\): *(\\d+)`, 'i'
+      )
+
+      for (const line of extras) {
+        let count: number | null = null
+        let dateStr: string | null = null
+
+        let match = pattNew.exec(line)
+        if (match) {
+          count = parseInt(match[1])
+          dateStr = match[2] || null
+        }
+        if (count === null) {
+          match = pattNewNoDate.exec(line)
+          if (match) {
+            count = parseInt(match[1])
+            dateStr = null
+          }
+        }
+        if (count === null) {
+          match = pattOld.exec(line)
+          if (match) {
+            count = parseInt(match[1])
+            dateStr = match[2] || null
+          }
+        }
+        if (count === null) {
+          match = pattVeryOld.exec(line)
+          if (match) {
+            count = parseInt(match[1])
+            dateStr = null
+          }
         }
 
-        if (match?.[1]) {
-          found[tag_] = parseInt(match[1])
-          break
+        if (count !== null) {
+          if (!latestCounts[tag] || (dateStr && (!latestCounts[tag].date || dateStr > latestCounts[tag].date))) {
+            latestCounts[tag] = { count, date: dateStr || '' }
+          }
         }
       }
     }
@@ -694,14 +729,84 @@ class Core {
     const databases: string[] = []
 
     for (const tag of operationsIncluded) {
-      const count = found[tag]
-      counts.push(count >= 0 ? count.toString() : '-')
+      const entry = latestCounts[tag]
+      counts.push(entry ? entry.count.toString() : '-')
       databases.push(tag)
     }
 
     // Only return if at least one count was found
     const hasAnyCount = counts.some((count) => count !== '-')
     return hasAnyCount ? { counts, databases } : null
+  }
+
+  /**
+   * Extract FWCI from Extra field for display in custom column
+   * @param item Zotero item
+   * @returns FWCI string or '-' if not found
+   */
+  static getFWCIForColumn(item: Zotero.Item): string {
+    // Scan ALL known sources, not just configured ones — FWCI data may exist
+    // from previous plugins (e.g. zotero-cc) regardless of current settings
+    const allSources = ['crossref', 'inspire', 'semanticscholar', 'openalex']
+
+    const extra = item.getField('extra')
+    if (!extra) return '-'
+
+    const extras = extra.split('\n')
+    let bestFwci: number | null = null
+    let bestDate: string | null = null
+
+    for (const tag of allSources) {
+      const tagName = getOperationName(tag)
+      const escapedTag = escapeRegex(tagName)
+
+      // Current format: "FWCI: N.NN (SourceName) [YYYY-MM-DD]"
+      const pattNew = new RegExp(
+        `^FWCI: *(\\d+\\.?\\d*) *\\(${escapedTag}\\) *\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\]`, 'i'
+      )
+      // Without date: "FWCI: N.NN (SourceName)"
+      const pattNoDate = new RegExp(
+        `^FWCI: *(\\d+\\.?\\d*) *\\(${escapedTag}\\)`, 'i'
+      )
+      // Old zotero-cc format: "FWCI: N.NN (SourceName/IDType) [YYYY-MM-DD]"
+      const pattOld = new RegExp(
+        `^FWCI: *(\\d+\\.?\\d*) *\\(${escapedTag}(?:\\/\\w+)?\\) *(?:\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\])?`, 'i'
+      )
+
+      for (const line of extras) {
+        let match = pattNew.exec(line)
+        let fwciVal: number | null = null
+        let dateStr: string | null = null
+
+        if (match) {
+          fwciVal = parseFloat(match[1])
+          dateStr = match[2] || null
+        }
+        if (fwciVal === null) {
+          match = pattNoDate.exec(line)
+          if (match) {
+            fwciVal = parseFloat(match[1])
+            dateStr = null
+          }
+        }
+        if (fwciVal === null) {
+          match = pattOld.exec(line)
+          if (match) {
+            fwciVal = parseFloat(match[1])
+            dateStr = match[2] || null
+          }
+        }
+
+        if (fwciVal !== null && !isNaN(fwciVal)) {
+          if (bestFwci === null || (dateStr && (!bestDate || dateStr > bestDate))) {
+            bestFwci = fwciVal
+            bestDate = dateStr || null
+          }
+        }
+      }
+    }
+
+    return bestFwci !== null ? bestFwci.toFixed(2) : '-'
   }
 
   /**
@@ -1038,6 +1143,91 @@ class DBInterface {
     // All identifiers failed
     return { count: 0, status: 'not_found', message: 'No valid identifiers found in Semantic Scholar' }
   }
+
+  /**
+   * Get citation count from OpenAlex
+   * @param item Zotero item
+   * @returns Citation count or -1 if not found/error
+   */
+  static async getOpenAlexCount(item: Zotero.Item): Promise<number> {
+    const result = await this.getOpenAlexCountEnhanced(item)
+    return result.count
+  }
+
+  /**
+   * Get citation count from OpenAlex with enhanced status information
+   * @param item Zotero item
+   * @returns LookupResult with count, status, and optional FWCI
+   */
+  static async getOpenAlexCountEnhanced(item: Zotero.Item): Promise<LookupResult> {
+    const identifier = Helpers.getItemIdentifier(item)
+    if (identifier?.type !== 'doi') {
+      ztoolkit.log('Citation debug - No DOI found for OpenAlex lookup:', item.id)
+      return { count: -1, status: 'no_identifier', message: 'No DOI found (OpenAlex requires DOI)' }
+    }
+
+    // DOI normalization: strip common prefixes, then URL-decode
+    const decodedDoi = decodeURIComponent(identifier.id)
+    const normalizedDoi = decodedDoi
+      .replace(/^https?:\/\/(dx\.)?doi\.org\//i, '')
+      .replace(/^doi:/i, '')
+      .trim()
+
+    if (!normalizedDoi) {
+      ztoolkit.log('Citation debug - DOI normalization produced empty string for item:', item.id)
+      return { count: -1, status: 'no_identifier', message: 'DOI normalization failed' }
+    }
+
+    // Apply adaptive rate limiting
+    await RateLimitManager.waitForRateLimit('openalex')
+
+    const url = `https://api.openalex.org/works/https://doi.org/${encodeURIComponent(normalizedDoi)}?select=cited_by_count,fwci&mailto=openalex@citationtally.org`
+    ztoolkit.log('Citation debug - Fetching from OpenAlex API:', url)
+
+    try {
+      const fetchResponse = await fetch(url)
+
+      if (fetchResponse.status === 404) {
+        ztoolkit.log('Citation debug - DOI not found in OpenAlex:', identifier.id)
+        return { count: 0, status: 'not_found', message: 'DOI not found in OpenAlex' }
+      }
+
+      if (fetchResponse.status === 429) {
+        RateLimitManager.handleRateLimit('openalex')
+        return { count: -1, status: 'rate_limited', message: 'OpenAlex API rate limit exceeded' }
+      }
+
+      const response: any = await fetchResponse.json().catch((error) => {
+        ztoolkit.log('Citation debug - OpenAlex API response parse error:', error)
+        return null
+      })
+
+      if (response === null) {
+        return { count: -1, status: 'api_error', message: 'OpenAlex API response parsing failed' }
+      }
+
+      ztoolkit.log('Citation debug - OpenAlex API response:', JSON.stringify(response).substring(0, 500) + '...')
+
+      const count: unknown = response.cited_by_count
+      const fwci: unknown = response.fwci
+
+      if (count === undefined && fwci === undefined) {
+        return { count: 0, status: 'not_found', message: 'No data in OpenAlex response' }
+      }
+
+      const resultCount = typeof count === 'number' ? count : typeof count === 'string' ? parseInt(count) : 0
+
+      RateLimitManager.handleSuccess('openalex')
+      return {
+        count: isNaN(resultCount) ? 0 : resultCount,
+        status: 'success',
+        fwci: typeof fwci === 'number' ? fwci : undefined,
+      }
+    } catch (err) {
+      ztoolkit.log('Error getting citation count from OpenAlex', err)
+      return { count: -1, status: 'api_error', message: (err as Error).message }
+    }
+  }
 }
 
 // Notifier callback to detect newly added items
@@ -1214,6 +1404,9 @@ async function updateItem(
       } else if (operation === 'semanticscholar') {
         result = await DBInterface.getSemanticScholarCountEnhanced(item)
         displayName = getOperationName(operation)
+      } else if (operation === 'openalex') {
+        result = await DBInterface.getOpenAlexCountEnhanced(item)
+        displayName = getOperationName(operation)
       } else {
         continue
       }
@@ -1229,7 +1422,7 @@ async function updateItem(
         // Clear any previous ignored status on successful result
         ztoolkit.log(`Citation debug - ${operation} success for item ${item.id}: count=${result.count}`)
         IgnoredItemsManager.clearIgnoredItem(item.id, operation)
-        data.push({ title: displayName, count: result.count })
+        data.push({ title: displayName, count: result.count, fwci: result.fwci })
       } else if (result.status === 'rate_limited') {
         ztoolkit.log(`Citation debug - ${operation} rate limited for item ${item.id}: ${result.message}`)
         // Don't mark as ignored for rate limits - purely temporary
@@ -1387,6 +1580,32 @@ class UIRegistrar {
   }
 
   /**
+   * Register custom column to display FWCI (Field-Weighted Citation Impact)
+   */
+  static registerFWCIColumn() {
+    ztoolkit.log('Citation debug - Registering FWCI column')
+    Zotero.ItemTreeManager.registerColumn({
+      pluginID: addon.data.config.addonID,
+      dataKey: 'fwci',
+      label: getString('column-fwci'),
+      width: '60',
+      flex: 0,
+      zoteroPersist: ['width', 'ordinal', 'hidden', 'sortDirection'],
+      dataProvider: (item: Zotero.Item) => {
+        return Core.getFWCIForColumn(item)
+      },
+      renderCell(index, data: any, column, isFirstColumn, doc) {
+        const span = doc.createElement('span')
+        span.className = `cell ${column.className}`
+        span.style.textAlign = 'center'
+        span.innerText = data || '-'
+        return span
+      },
+    })
+    ztoolkit.log('Citation debug - FWCI Column registration complete')
+  }
+
+  /**
    * Register the notifier to detect new items
    */
   static registerNotifier() {
@@ -1417,33 +1636,108 @@ class UIRegistrar {
   }
 
   /**
-   * Register a context menu item to update citation counts for selected items
+   * Register context menu items to update citation counts for selected items.
+   * Uses MenuManager on Zotero 9, falls back to DOM injection on Zotero 7.
    */
   static registerCitationCountMenuItem() {
-    ;(Zotero as any).MenuManager.registerMenu({
-      menuID: `${addon.data.config.addonID}-update-citations`,
-      pluginID: addon.data.config.addonID,
-      target: 'main/library/item',
-      menus: [
-        {
-          menuType: 'menuitem',
-          l10nID: getLocaleID('menuitem-update-citation-tallies'),
-          icon: 'chrome://zotero/skin/toolbar-advanced-search.png',
-          onShowing: () => {
-            try {
-              const zoteroPane = Zotero.getActiveZoteroPane()
-              if (!zoteroPane) return false
-              const selectedItems = zoteroPane.getSelectedItems()
-              if (!selectedItems || selectedItems.length === 0) return false
-              return selectedItems.some((item) => item.isRegularItem())
-            } catch {
-              return false
-            }
+    // Zotero 9 path: use MenuManager API
+    if ((Zotero as any).MenuManager?.registerMenu) {
+      const showWhen = () => {
+        try {
+          const zoteroPane = Zotero.getActiveZoteroPane()
+          if (!zoteroPane) return false
+          const selectedItems = zoteroPane.getSelectedItems()
+          if (!selectedItems || selectedItems.length === 0) return false
+          return selectedItems.some((item: Zotero.Item) => item.isRegularItem())
+        } catch {
+          return false
+        }
+      }
+
+      ;(Zotero as any).MenuManager.registerMenu({
+        menuID: `${addon.data.config.addonID}-update-citations`,
+        pluginID: addon.data.config.addonID,
+        target: 'main/library/item',
+        menus: [
+          {
+            menuType: 'menuitem',
+            l10nID: getLocaleID('menuitem-update-citation-tallies'),
+            icon: 'chrome://zotero/skin/toolbar-advanced-search.png',
+            onShowing: showWhen,
+            onCommand: () => addon.hooks.onDialogEvents('updateCitationCounts'),
           },
-          onCommand: () => addon.hooks.onDialogEvents('updateCitationCounts'),
-        },
-      ],
-    })
+        ],
+      })
+
+      const sources = [
+        { key: 'crossref', l10nSuffix: 'crossref' },
+        { key: 'inspire', l10nSuffix: 'inspire' },
+        { key: 'semanticscholar', l10nSuffix: 'semanticscholar' },
+        { key: 'openalex', l10nSuffix: 'openalex' },
+      ]
+
+      for (const source of sources) {
+        ;(Zotero as any).MenuManager.registerMenu({
+          menuID: `${addon.data.config.addonID}-update-citations-${source.key}`,
+          pluginID: addon.data.config.addonID,
+          target: 'main/library/item',
+          menus: [
+            {
+              menuType: 'menuitem',
+              l10nID: getLocaleID(`menuitem-update-${source.l10nSuffix}`),
+              onCommand: () => addon.hooks.onDialogEvents(`updateCitationCounts-${source.key}`),
+            },
+          ],
+        })
+      }
+      return
+    }
+
+    // Zotero 7 fallback: inject menuitems into the item context menu via DOM
+    if (UIRegistrar._zotero7MenuInjected) return
+    UIRegistrar._zotero7MenuInjected = true
+
+    for (const win of Zotero.getMainWindows()) {
+      const doc = win.document
+      const itemMenu = doc.getElementById('zotero-itemmenu')
+      if (!itemMenu) continue
+
+      // Create separator
+      const sep = doc.createXULElement?.('menuseparator') || doc.createElement('menuseparator')
+      itemMenu.appendChild(sep)
+
+      // "Update Citation Tallies" (all sources)
+      const menuAll = UIRegistrar._createZotero7MenuItem(doc, 'menuitem-update-citation-tallies', () => {
+        addon.hooks.onDialogEvents('updateCitationCounts')
+      })
+      itemMenu.appendChild(menuAll)
+
+      // Per-source items
+      const sourceDefs = [
+        { key: 'crossref', l10n: 'menuitem-update-crossref' },
+        { key: 'inspire', l10n: 'menuitem-update-inspire' },
+        { key: 'semanticscholar', l10n: 'menuitem-update-semanticscholar' },
+        { key: 'openalex', l10n: 'menuitem-update-openalex' },
+      ]
+      for (const src of sourceDefs) {
+        const menuItem = UIRegistrar._createZotero7MenuItem(doc, src.l10n, () => {
+          addon.hooks.onDialogEvents(`updateCitationCounts-${src.key}`)
+        })
+        itemMenu.appendChild(menuItem)
+      }
+    }
+  }
+
+  private static _zotero7MenuInjected = false
+
+  /**
+   * Helper: create a localized menuitem for Zotero 7 DOM injection
+   */
+  static _createZotero7MenuItem(doc: Document, l10nId: string, onCommand: () => void): Element {
+    const item = doc.createXULElement?.('menuitem') || doc.createElement('menuitem')
+    item.setAttribute('data-l10n-id', getLocaleID(l10nId))
+    item.addEventListener('command', onCommand)
+    return item
   }
 
   /**
@@ -1469,7 +1763,7 @@ class UX {
   /**
    * Update citation counts for all selected items
    */
-  static updateSelectedItemsCitationCounts() {
+  static updateSelectedItemsCitationCounts(operations?: string) {
     // Get selected items
     const items = Zotero.getActiveZoteroPane().getSelectedItems()
 
@@ -1534,7 +1828,7 @@ class UX {
     //   .startCloseTimer(3000)
     // return
 
-    updateItems(items)
+    updateItems(items, operations)
   }
 }
 

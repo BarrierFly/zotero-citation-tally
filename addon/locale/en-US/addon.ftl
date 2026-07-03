@@ -7,6 +7,16 @@ menuitem-submenulabel = Citation Tally
 menuitem-filemenulabel = Citation Tally: File Menu
 menuitem-update-citation-tallies =
     .label = Update Citation Tallies
+menuitem-update-all-sources =
+    .label = All Sources
+menuitem-update-crossref =
+    .label = Update from Crossref
+menuitem-update-inspire =
+    .label = Update from INSPIRE
+menuitem-update-semanticscholar =
+    .label = Update from SemanticScholar
+menuitem-update-openalex =
+    .label = Update from OpenAlex
 menuitem-retally-outdated-citations =
     .label = Retally outdated item citations
 prefs-title = Citation Tally
@@ -31,7 +41,9 @@ auto-update-completed = Auto update completed: { $updated }/{ $total } items upd
 database-crossref = Crossref
 database-inspire = INSPIRE
 database-semanticscholar = SemanticScholar
+database-openalex = OpenAlex
 
 # Column and tooltip
 column-citations = Citations
+column-fwci = FWCI
 tooltip-citation-tallies = { $displayName }: { $count }

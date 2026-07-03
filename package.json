@@ -1,25 +1,25 @@
 {
   "name": "zotero-citation-tally",
-  "version": "0.0.13",
-  "description": "Plugin that tallies citation counts for Zotero items",
-  "author": "Dae Houlihan <dev@daeh.info> (https://daeh.info)",
+  "version": "0.1.0",
+  "description": "Citation tally plugin for Zotero — supports Crossref, INSPIRE, Semantic Scholar, OpenAlex (with FWCI). Append-only non-destructive storage. Zotero 7/8/9 compatible.",
+  "author": "BarrierFly <192061362+BarrierFly@users.noreply.github.com>",
   "license": "AGPL-3.0",
   "type": "module",
   "config": {
     "addonName": "Citation Tally",
-    "addonID": "dev@daeh.info",
+    "addonID": "citation-tally@barrierfly",
     "addonRef": "citationtally",
     "addonInstance": "CitationTally",
     "prefsPrefix": "extensions.zotero.citationtally"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/daeh/zotero-citation-tally.git"
+    "url": "git+https://github.com/BarrierFly/zotero-citation-tally.git"
   },
   "bugs": {
-    "url": "https://github.com/daeh/zotero-citation-tally/issues"
+    "url": "https://github.com/BarrierFly/zotero-citation-tally/issues"
   },
-  "homepage": "https://github.com/daeh/zotero-citation-tally#readme",
+  "homepage": "https://github.com/BarrierFly/zotero-citation-tally#readme",
   "scripts": {
     "start": "zotero-plugin serve",
     "build": "zotero-plugin build && tsc --noEmit && node utils/patch-update-json.mjs",

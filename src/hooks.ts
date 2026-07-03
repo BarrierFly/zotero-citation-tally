@@ -27,6 +27,9 @@ async function onStartup() {
   // Register custom column for citation counts
   UIRegistrar.registerCitationColumn()
 
+  // Register custom column for FWCI
+  UIRegistrar.registerFWCIColumn()
+
   // KeyExampleFactory.registerShortcuts()
 
   // await UIExampleFactory.registerExtraColumn()
@@ -199,6 +202,18 @@ function onDialogEvents(type: string) {
     */
     case 'updateCitationCounts':
       UX.updateSelectedItemsCitationCounts()
+      break
+    case 'updateCitationCounts-crossref':
+      UX.updateSelectedItemsCitationCounts('crossref')
+      break
+    case 'updateCitationCounts-inspire':
+      UX.updateSelectedItemsCitationCounts('inspire')
+      break
+    case 'updateCitationCounts-semanticscholar':
+      UX.updateSelectedItemsCitationCounts('semanticscholar')
+      break
+    case 'updateCitationCounts-openalex':
+      UX.updateSelectedItemsCitationCounts('openalex')
       break
     case 'retallyOutdatedCitations':
       void startAutomaticUpdate(false) // false = show progress UI
