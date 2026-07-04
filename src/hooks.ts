@@ -30,6 +30,9 @@ async function onStartup() {
   // Register custom column for FWCI
   UIRegistrar.registerFWCIColumn()
 
+  // Register custom column for average citations per year
+  UIRegistrar.registerAvgCiteColumn()
+
   // KeyExampleFactory.registerShortcuts()
 
   // await UIExampleFactory.registerExtraColumn()
@@ -214,6 +217,9 @@ function onDialogEvents(type: string) {
       break
     case 'updateCitationCounts-openalex':
       UX.updateSelectedItemsCitationCounts('openalex')
+      break
+    case 'updateCitationCounts-avgcite':
+      UX.updateSelectedItemsAvgCite()
       break
     case 'retallyOutdatedCitations':
       void startAutomaticUpdate(false) // false = show progress UI

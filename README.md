@@ -4,7 +4,7 @@
 
 [![zotero target version](https://img.shields.io/badge/Zotero-9-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org) [![Using Zotero Plugin Template](https://img.shields.io/badge/Using-Zotero%20Plugin%20Template-blue?style=flat-square&logo=github)](https://github.com/windingwind/zotero-plugin-template)
 
-**_Displays citation counts for Zotero library items._**
+**_Displays citation counts, FWCI, and average citations per year for Zotero library items._**
 
 ![Screenshot](docs/assets/readme/screenshot.png)
 
@@ -13,9 +13,12 @@ This is a plugin for [Zotero](https://www.zotero.org), a research source managem
 ## Plugin Functions
 
 - **Automatic Citation Tracking** - Fetches citation counts when new items are added to your library
+- **Field-Weighted Citation Impact (FWCI)** - Displays FWCI from OpenAlex alongside citation counts
+- **Average Citations Per Year** - Computes and displays locally-calculated average citations per year (年均引用)
 - **Smart Auto-Updates** - Keeps citation data current with configurable update schedules
-- **Visual Integration** - Adds a sortable "Citations" column to your Zotero library view
-- **Multiple Databases** - Queries Crossref, Semantic Scholar, and INSPIRE in configurable order
+- **Visual Integration** - Adds sortable "Citations", "FWCI", and "AvgCite/Yr" columns to your Zotero library view
+- **Multiple Databases** - Queries Crossref, Semantic Scholar, INSPIRE, and OpenAlex in configurable order
+- **Per-Source Updates** - Right-click menu allows updating citations from individual databases
 - **Intelligent Rate Limiting** - Respects API limits with adaptive throttling
 - **Persistent Storage** - Stores citation data in item's Extra field for sync compatibility
 
@@ -60,6 +63,11 @@ Once installed, the plugin will automatically begin tracking citation counts for
 - **Update Selected Items**: Right-click → "Update Citation Tallies"
   - **_NB_** Manual updates bypass all retry restrictions and cooldown periods
 
+- **Update from Specific Source**: Right-click → choose a per-source update (Crossref, INSPIRE, SemanticScholar, OpenAlex)
+
+- **Compute Avg Citations/Year**: Right-click → "更新年均引用" / "Update Avg Citations/Year"
+  - Locally computes average citations per year from existing citation data and publication date
+
 - **Update All Outdated**: Tools menu → "Retally outdated item citations"
   - This runs at startup but you can also trigger it manually.
 
@@ -70,14 +78,16 @@ Once installed, the plugin will automatically begin tracking citation counts for
 <summary>Database Settings</summary>
 
 - **Database Priority Order**: Configure which databases to query and in what order. The plugin will try each database until it finds citation data.
-  - Default order: `crossref, semanticscholar, inspire`
+  - Default order: `crossref, semanticscholar`
+  - Available databases: `crossref`, `semanticscholar`, `inspire`, `openalex`
   - You can reorder these based on your field and preferences
   - For physics papers, you might prefer: `inspire, crossref, semanticscholar`
   - For general academic papers: `crossref, semanticscholar`
+  - For FWCI data, include `openalex` in your database order
 
 - **Automatic Updates**: Enable automatic citation updates on startup for outdated items
 - **Adaptive Rate Limiting**: Smart rate limiting that starts with base delays and automatically increases up to 10x when rate limits are detected, then gradually decreases on success
-- **Database-Specific Rate Limits**: Configure individual base rate limits for each database (Crossref, INSPIRE, Semantic Scholar)
+- **Database-Specific Rate Limits**: Configure individual base rate limits for each database (Crossref, INSPIRE, Semantic Scholar, OpenAlex)
 
 </details>
 
@@ -116,6 +126,7 @@ The plugin respects API limits with intelligent throttling:
 - Crossref: 1 second
 - INSPIRE: 1 second
 - Semantic Scholar: 3 seconds
+- OpenAlex: 1 second
 
 **Adaptive Behavior:**
 
@@ -144,8 +155,9 @@ The plugin can fetch citations for items with:
 ## Supported Databases
 
 - **[Crossref](https://www.crossref.org/)**: Comprehensive database for scholarly publications with DOIs
-- **[Semantic Scholar](https://www.semanticscholar.org/)**: AI-powered academic search engine with citation analysis
 - **[INSPIRE](https://inspirehep.net/)**: High-energy physics literature database
+- **[Semantic Scholar](https://www.semanticscholar.org/)**: AI-powered academic search engine with citation analysis
+- **[OpenAlex](https://openalex.org/)**: Open catalog of scholarly works providing citation counts and FWCI (Field-Weighted Citation Impact)
 
 ## Related Projects
 

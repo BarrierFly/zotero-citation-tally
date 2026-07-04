@@ -810,11 +810,187 @@ class Core {
   }
 
   /**
-   * Extract citation count from Extra field
+   * Extract publication year from a Zotero item's date field
    * @param item Zotero item
-   * @param tag Citation source tag
-   * @returns Citation count or -1 if not found
+   * @returns Publication year or null if unparseable
    */
+  static getPublicationYear(item: Zotero.Item): number | null {
+    const dateStr = item.getField('date')
+    if (!dateStr) return null
+    // Match first 4-digit year in range 1000–2100
+    const match = dateStr.match(/\b(1[0-9]{3}|20[0-9]{2}|2100)\b/)
+    if (match) {
+      return parseInt(match[1], 10)
+    }
+    return null
+  }
+
+  /**
+   * Find the most recent citation count across ALL known sources in the Extra field
+   * @param extra The Extra field content
+   * @returns The latest citation count and its source name, or null if none found
+   */
+  static findLatestCitationFromExtra(extra: string): { count: number; sourceName: string } | null {
+    const allSources = ['crossref', 'inspire', 'semanticscholar', 'openalex']
+    const extras = extra.split('\n')
+    let bestCount: number | null = null
+    let bestSourceName: string | null = null
+    let bestDate: string | null = null
+
+    for (const tag of allSources) {
+      const tagName = getOperationName(tag)
+      const escapedTag = escapeRegex(tagName)
+
+      // Same four patterns as getCitationCountForColumn
+      const pattNew = new RegExp(
+        `^Citations: *(\\d+) *\\(${escapedTag}\\) *\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\]`, 'i'
+      )
+      const pattNewNoDate = new RegExp(
+        `^Citations: *(\\d+) *\\(${escapedTag}\\)`, 'i'
+      )
+      const pattOld = new RegExp(
+        `^(\\d+) citations \\(${escapedTag}(?:\\/\\w+)?\\) *(?:\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\])?`, 'i'
+      )
+      const pattVeryOld = new RegExp(
+        `^Citations \\(${escapedTag}\\): *(\\d+)`, 'i'
+      )
+
+      for (const line of extras) {
+        let count: number | null = null
+        let dateStr: string | null = null
+
+        let match = pattNew.exec(line)
+        if (match) { count = parseInt(match[1]); dateStr = match[2] || null }
+        if (count === null) {
+          match = pattNewNoDate.exec(line)
+          if (match) { count = parseInt(match[1]); dateStr = null }
+        }
+        if (count === null) {
+          match = pattOld.exec(line)
+          if (match) { count = parseInt(match[1]); dateStr = match[2] || null }
+        }
+        if (count === null) {
+          match = pattVeryOld.exec(line)
+          if (match) { count = parseInt(match[1]); dateStr = null }
+        }
+
+        if (count !== null) {
+          if (bestCount === null || (dateStr && (!bestDate || dateStr > bestDate))) {
+            bestCount = count
+            bestDate = dateStr || null
+            bestSourceName = tagName
+          }
+        }
+      }
+    }
+
+    return bestCount !== null && bestSourceName !== null
+      ? { count: bestCount, sourceName: bestSourceName }
+      : null
+  }
+
+  /**
+   * Compute and store average citations per year in the Extra field.
+   * Uses the latest citation count (across all sources) divided by years since publication.
+   * @param item Zotero item
+   * @returns true if a new entry was stored, false otherwise
+   */
+  static async computeAndSetAvgCiteForItem(item: Zotero.Item): Promise<boolean> {
+    const extra = item.getField('extra') || ''
+    const citationInfo = Core.findLatestCitationFromExtra(extra)
+    if (!citationInfo) {
+      ztoolkit.log('AvgCite debug - No citation data found for item:', item.id)
+      return false
+    }
+
+    const pubYear = Core.getPublicationYear(item)
+    if (pubYear === null) {
+      ztoolkit.log('AvgCite debug - No publication year for item:', item.id)
+      return false
+    }
+
+    const currentYear = new Date().getFullYear()
+    const yearsSincePub = Math.max(1, currentYear - pubYear)
+    const avgCite = citationInfo.count / yearsSincePub
+
+    // Format date
+    const today = new Date()
+    const dd = String(today.getDate()).padStart(2, '0')
+    const mm = String(today.getMonth() + 1).padStart(2, '0')
+    const yyyy = today.getFullYear()
+    const date = `${yyyy}-${mm}-${dd}`
+
+    const newEntry = `AvgCite: ${avgCite.toFixed(2)} (${citationInfo.sourceName}) [${date}]` ///REGEXP
+
+    const extras = extra.split('\n')
+    if (extras.includes(newEntry)) {
+      ztoolkit.log('AvgCite debug - Skipping exact duplicate:', newEntry)
+      return false
+    }
+
+    extras.unshift(newEntry)
+    const newExtra = extras.join('\n')
+    item.setField('extra', newExtra)
+    await item.saveTx()
+    ztoolkit.log('AvgCite debug - Stored avg cite:', newEntry)
+    return true
+  }
+
+  /**
+   * Extract average citations per year from the Extra field for display in custom column
+   * @param item Zotero item
+   * @returns AvgCite value string or '-' if not found
+   */
+  static getAvgCiteForColumn(item: Zotero.Item): string {
+    const allSources = ['crossref', 'inspire', 'semanticscholar', 'openalex']
+    const extra = item.getField('extra')
+    if (!extra) return '-'
+
+    const extras = extra.split('\n')
+    let bestValue: number | null = null
+    let bestDate: string | null = null
+
+    for (const tag of allSources) {
+      const tagName = getOperationName(tag)
+      const escapedTag = escapeRegex(tagName)
+
+      // "AvgCite: N.NN (SourceName) [YYYY-MM-DD]"
+      const pattNew = new RegExp(
+        `^AvgCite: *(\\d+\\.?\\d*) *\\(${escapedTag}\\) *\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\]`, 'i'
+      )
+      // "AvgCite: N.NN (SourceName)" without date
+      const pattNoDate = new RegExp(
+        `^AvgCite: *(\\d+\\.?\\d*) *\\(${escapedTag}\\)`, 'i'
+      )
+
+      for (const line of extras) {
+        let match = pattNew.exec(line)
+        let value: number | null = null
+        let dateStr: string | null = null
+
+        if (match) {
+          value = parseFloat(match[1])
+          dateStr = match[2] || null
+        }
+        if (value === null) {
+          match = pattNoDate.exec(line)
+          if (match) {
+            value = parseFloat(match[1])
+            dateStr = null
+          }
+        }
+
+        if (value !== null && !isNaN(value)) {
+          if (bestValue === null || (dateStr && (!bestDate || dateStr > bestDate))) {
+            bestValue = value
+            bestDate = dateStr || null
+          }
+        }
+      }
+    }
+
+    return bestValue !== null ? bestValue.toFixed(2) : '-'
+  }
 }
 
 class DBInterface {
@@ -1606,6 +1782,32 @@ class UIRegistrar {
   }
 
   /**
+   * Register custom column to display average citations per year
+   */
+  static registerAvgCiteColumn() {
+    ztoolkit.log('Citation debug - Registering AvgCite column')
+    Zotero.ItemTreeManager.registerColumn({
+      pluginID: addon.data.config.addonID,
+      dataKey: 'avgCite',
+      label: getString('column-avgcite'),
+      width: '60',
+      flex: 0,
+      zoteroPersist: ['width', 'ordinal', 'hidden', 'sortDirection'],
+      dataProvider: (item: Zotero.Item) => {
+        return Core.getAvgCiteForColumn(item)
+      },
+      renderCell(index, data: any, column, isFirstColumn, doc) {
+        const span = doc.createElement('span')
+        span.className = `cell ${column.className}`
+        span.style.textAlign = 'center'
+        span.innerText = data || '-'
+        return span
+      },
+    })
+    ztoolkit.log('Citation debug - AvgCite Column registration complete')
+  }
+
+  /**
    * Register the notifier to detect new items
    */
   static registerNotifier() {
@@ -1690,6 +1892,20 @@ class UIRegistrar {
           ],
         })
       }
+
+      // Average citations per year (locally computed)
+      ;(Zotero as any).MenuManager.registerMenu({
+        menuID: `${addon.data.config.addonID}-update-avgcite`,
+        pluginID: addon.data.config.addonID,
+        target: 'main/library/item',
+        menus: [
+          {
+            menuType: 'menuitem',
+            l10nID: getLocaleID('menuitem-update-avgcite'),
+            onCommand: () => addon.hooks.onDialogEvents('updateCitationCounts-avgcite'),
+          },
+        ],
+      })
       return
     }
 
@@ -1725,6 +1941,12 @@ class UIRegistrar {
         })
         itemMenu.appendChild(menuItem)
       }
+
+      // Average citations per year (locally computed)
+      const menuAvgCite = UIRegistrar._createZotero7MenuItem(doc, 'menuitem-update-avgcite', () => {
+        addon.hooks.onDialogEvents('updateCitationCounts-avgcite')
+      })
+      itemMenu.appendChild(menuAvgCite)
     }
   }
 
@@ -1829,6 +2051,60 @@ class UX {
     // return
 
     updateItems(items, operations)
+  }
+
+  /**
+   * Compute and store average citations per year for all selected items.
+   * This is a locally computed metric — no API calls needed.
+   */
+  static async updateSelectedItemsAvgCite() {
+    const items = Zotero.getActiveZoteroPane().getSelectedItems()
+    const regularItems = items.filter((item) => item.isRegularItem())
+
+    if (regularItems.length === 0) {
+      new ztoolkit.ProgressWindow(addon.data.config.addonName, {
+        closeOnClick: true,
+      })
+        .createLine({
+          text: getString('progress-no-valid-items'),
+          type: 'error',
+        })
+        .show()
+        .startCloseTimer(3000)
+      return
+    }
+
+    const progressWindow = new ztoolkit.ProgressWindow(addon.data.config.addonName)
+    progressWindow.createLine({
+      text: getString('progress-getting-avgcite'),
+      type: 'default',
+      progress: 0,
+    })
+
+    let updatedCount = 0
+    for (let i = 0; i < regularItems.length; i++) {
+      const item = regularItems[i]
+      const percent = Math.round((i / regularItems.length) * 100)
+      progressWindow.changeLine({
+        text: getString('progress-item-counter', { args: { current: i + 1, total: regularItems.length } }),
+        progress: percent,
+      })
+      progressWindow.show()
+
+      const stored = await Core.computeAndSetAvgCiteForItem(item)
+      if (stored) updatedCount++
+    }
+
+    progressWindow.close()
+
+    const successWindow = new ztoolkit.ProgressWindow(addon.data.config.addonName)
+    successWindow.createLine({
+      text: getString('progress-avgcite-updated', { args: { count: updatedCount } }),
+      type: 'success',
+      progress: 100,
+    })
+    successWindow.show()
+    successWindow.startCloseTimer(4000)
   }
 }
 

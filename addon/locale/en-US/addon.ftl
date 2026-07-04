@@ -17,6 +17,8 @@ menuitem-update-semanticscholar =
     .label = Update from SemanticScholar
 menuitem-update-openalex =
     .label = Update from OpenAlex
+menuitem-update-avgcite =
+    .label = Update Avg Citations/Year
 menuitem-retally-outdated-citations =
     .label = Retally outdated item citations
 prefs-title = Citation Tally
@@ -25,8 +27,10 @@ prefs-table-detail = Detail
 
 # Progress window messages
 progress-getting-citation-tallies = Getting citation tallies
+progress-getting-avgcite = Computing average citations per year
 progress-no-valid-items = No valid items selected for citation tally update.
 progress-items-updated = Citation tallies updated for { $count } items.
+progress-avgcite-updated = Average citations per year updated for { $count } items.
 progress-item-counter = Item { $current } of { $total }
 
 # Auto-update messages
@@ -46,4 +50,5 @@ database-openalex = OpenAlex
 # Column and tooltip
 column-citations = Citations
 column-fwci = FWCI
+column-avgcite = AvgCite/Yr
 tooltip-citation-tallies = { $displayName }: { $count }
