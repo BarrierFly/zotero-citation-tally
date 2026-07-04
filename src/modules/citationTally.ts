@@ -810,19 +810,57 @@ class Core {
   }
 
   /**
-   * Extract publication year from a Zotero item's date field
+   * Extract publication date from a Zotero item's date field.
+   * Returns year, month (1-12), and optionally day for precise age calculation.
+   * @param item Zotero item
+   * @returns Object with year, month, day fields, or null if year unparseable
+   */
+  static getPublicationDate(item: Zotero.Item): { year: number; month: number; day: number | null } | null {
+    const dateStr = item.getField('date')
+    if (!dateStr) return null
+
+    // Try YYYY-MM-DD, YYYY/MM/DD, YYYY.MM.DD
+    const fullDateMatch = dateStr.match(
+      /\b(1[0-9]{3}|20[0-9]{2}|2100)[-\/.](\d{1,2})[-\/.](\d{1,2})\b/
+    )
+    if (fullDateMatch) {
+      const year = parseInt(fullDateMatch[1], 10)
+      const month = parseInt(fullDateMatch[2], 10)
+      const day = parseInt(fullDateMatch[3], 10)
+      if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+        return { year, month, day }
+      }
+    }
+
+    // Try YYYY-MM or YYYY/MM
+    const yearMonthMatch = dateStr.match(
+      /\b(1[0-9]{3}|20[0-9]{2}|2100)[-\/.](\d{1,2})\b/
+    )
+    if (yearMonthMatch) {
+      const year = parseInt(yearMonthMatch[1], 10)
+      const month = parseInt(yearMonthMatch[2], 10)
+      if (month >= 1 && month <= 12) {
+        return { year, month, day: null }
+      }
+    }
+
+    // Fallback: bare 4-digit year
+    const yearMatch = dateStr.match(/\b(1[0-9]{3}|20[0-9]{2}|2100)\b/)
+    if (yearMatch) {
+      return { year: parseInt(yearMatch[1], 10), month: 0, day: null }
+    }
+    return null
+  }
+
+  /**
+   * Extract publication year from a Zotero item's date field.
+   * Convenience wrapper for getPublicationDate.
    * @param item Zotero item
    * @returns Publication year or null if unparseable
    */
   static getPublicationYear(item: Zotero.Item): number | null {
-    const dateStr = item.getField('date')
-    if (!dateStr) return null
-    // Match first 4-digit year in range 1000–2100
-    const match = dateStr.match(/\b(1[0-9]{3}|20[0-9]{2}|2100)\b/)
-    if (match) {
-      return parseInt(match[1], 10)
-    }
-    return null
+    const date = this.getPublicationDate(item)
+    return date ? date.year : null
   }
 
   /**
@@ -903,14 +941,32 @@ class Core {
       return false
     }
 
-    const pubYear = Core.getPublicationYear(item)
-    if (pubYear === null) {
+    const pubDate = Core.getPublicationDate(item)
+    if (pubDate === null) {
       ztoolkit.log('AvgCite debug - No publication year for item:', item.id)
       return false
     }
 
-    const currentYear = new Date().getFullYear()
-    const yearsSincePub = Math.max(1, currentYear - pubYear)
+    // Compute fractional years since publication for higher precision.
+    // If only year is known (month === 0), assume mid-year (July 2 ≈ day 183).
+    // If year + month are known (day === null), assume mid-month (15th).
+    const now = new Date()
+    let yearsSincePub: number
+    if (pubDate.month === 0) {
+      // Bare year: assume July 2 (mid-year, ~183 days in)
+      const pubTime = new Date(pubDate.year, 6, 2).getTime()
+      yearsSincePub = (now.getTime() - pubTime) / (365.25 * 24 * 60 * 60 * 1000)
+    } else if (pubDate.day === null) {
+      // Year + month: assume 15th of the month
+      const pubTime = new Date(pubDate.year, pubDate.month - 1, 15).getTime()
+      yearsSincePub = (now.getTime() - pubTime) / (365.25 * 24 * 60 * 60 * 1000)
+    } else {
+      // Full date: use exact day
+      const pubTime = new Date(pubDate.year, pubDate.month - 1, pubDate.day).getTime()
+      yearsSincePub = (now.getTime() - pubTime) / (365.25 * 24 * 60 * 60 * 1000)
+    }
+    // Floor at ~1 month (0.08 year) to prevent inflated averages for brand-new papers
+    yearsSincePub = Math.max(0.08, yearsSincePub)
     const avgCite = citationInfo.count / yearsSincePub
 
     // Format date
