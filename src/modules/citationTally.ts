@@ -868,7 +868,7 @@ class Core {
    * @param extra The Extra field content
    * @returns The latest citation count and its source name, or null if none found
    */
-  static findLatestCitationFromExtra(extra: string): { count: number; sourceName: string } | null {
+  static findLatestCitationFromExtra(extra: string): { count: number; sourceName: string; date: string | null } | null {
     const allSources = ['crossref', 'inspire', 'semanticscholar', 'openalex']
     const extras = extra.split('\n')
     let bestCount: number | null = null
@@ -923,13 +923,16 @@ class Core {
     }
 
     return bestCount !== null && bestSourceName !== null
-      ? { count: bestCount, sourceName: bestSourceName }
+      ? { count: bestCount, sourceName: bestSourceName, date: bestDate }
       : null
   }
 
   /**
    * Compute and store average citations per year in the Extra field.
    * Uses the latest citation count (across all sources) divided by years since publication.
+   * The endpoint for the time span is the citation count's own date (when the citation
+   * data was fetched), not the current date — this keeps the metric stable and meaningful
+   * even if the user recomputes it long after fetching.
    * @param item Zotero item
    * @returns true if a new entry was stored, false otherwise
    */
@@ -947,36 +950,42 @@ class Core {
       return false
     }
 
+    // Parse the citation's date as the endpoint for the time span.
+    // If the citation entry has no date, fall back to the current date.
+    let endDate: Date
+    let dateStr: string
+    if (citationInfo.date) {
+      const parts = citationInfo.date.split('-')
+      endDate = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]))
+      dateStr = citationInfo.date
+    } else {
+      const today = new Date()
+      endDate = today
+      dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
+    }
+
     // Compute fractional years since publication for higher precision.
     // If only year is known (month === 0), assume mid-year (July 2 ≈ day 183).
     // If year + month are known (day === null), assume mid-month (15th).
-    const now = new Date()
     let yearsSincePub: number
     if (pubDate.month === 0) {
       // Bare year: assume July 2 (mid-year, ~183 days in)
       const pubTime = new Date(pubDate.year, 6, 2).getTime()
-      yearsSincePub = (now.getTime() - pubTime) / (365.25 * 24 * 60 * 60 * 1000)
+      yearsSincePub = (endDate.getTime() - pubTime) / (365.25 * 24 * 60 * 60 * 1000)
     } else if (pubDate.day === null) {
       // Year + month: assume 15th of the month
       const pubTime = new Date(pubDate.year, pubDate.month - 1, 15).getTime()
-      yearsSincePub = (now.getTime() - pubTime) / (365.25 * 24 * 60 * 60 * 1000)
+      yearsSincePub = (endDate.getTime() - pubTime) / (365.25 * 24 * 60 * 60 * 1000)
     } else {
       // Full date: use exact day
       const pubTime = new Date(pubDate.year, pubDate.month - 1, pubDate.day).getTime()
-      yearsSincePub = (now.getTime() - pubTime) / (365.25 * 24 * 60 * 60 * 1000)
+      yearsSincePub = (endDate.getTime() - pubTime) / (365.25 * 24 * 60 * 60 * 1000)
     }
     // Floor at ~1 month (0.08 year) to prevent inflated averages for brand-new papers
     yearsSincePub = Math.max(0.08, yearsSincePub)
     const avgCite = citationInfo.count / yearsSincePub
 
-    // Format date
-    const today = new Date()
-    const dd = String(today.getDate()).padStart(2, '0')
-    const mm = String(today.getMonth() + 1).padStart(2, '0')
-    const yyyy = today.getFullYear()
-    const date = `${yyyy}-${mm}-${dd}`
-
-    const newEntry = `AvgCite: ${avgCite.toFixed(2)} (${citationInfo.sourceName}) [${date}]` ///REGEXP
+    const newEntry = `AvgCite: ${avgCite.toFixed(2)} (${citationInfo.sourceName}) [${dateStr}]` ///REGEXP
 
     const extras = extra.split('\n')
     if (extras.includes(newEntry)) {
