@@ -1,6 +1,6 @@
 {
   "name": "zotero-citation-tally",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Citation tally plugin for Zotero — supports Crossref, INSPIRE, Semantic Scholar, OpenAlex (with FWCI). Append-only non-destructive storage. Zotero 7/8/9 compatible.",
   "author": "BarrierFly <192061362+BarrierFly@users.noreply.github.com>",
   "license": "AGPL-3.0",
