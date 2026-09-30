@@ -11,6 +11,10 @@ const DEFAULT_RATE_LIMITS: Record<string, number> = {
 
 const MAX_RATE_LIMIT_MULTIPLIER = 10
 
+// Custom columns are sorted by their dataProvider string, so numeric values are
+// zero-padded to a fixed width to make the item tree sort them numerically.
+const SORT_PAD_WIDTH = 12
+
 // Adaptive rate limiting state
 class RateLimitManager {
   private static multipliers: Record<string, number> = {}
@@ -102,7 +106,15 @@ class IgnoredItemsManager {
       this.loaded = true
     }
     const data = getPref('ignoredItems')
-    return data ? JSON.parse(data) : {}
+    if (!data) {
+      return {}
+    }
+    try {
+      return JSON.parse(data)
+    } catch (e) {
+      ztoolkit.log('Failed to parse ignoredItems pref, treating as empty:', e)
+      return {}
+    }
   }
 
   private static savePersistentData(data: IgnoredItemsData): void {
@@ -295,6 +307,17 @@ function scheduleMonthlyCleanup() {
   }, 5000) // Delay 5 seconds after startup
 }
 
+/**
+ * Stop the scheduled cleanup (call on shutdown so the interval
+ * does not outlive a disabled plugin).
+ */
+function stopMonthlyCleanup() {
+  if (cleanupTimer) {
+    clearInterval(cleanupTimer)
+    cleanupTimer = null
+  }
+}
+
 // Operation display names (lazy-loaded to avoid startup issues)
 function getOperationName(key: string): string {
   const nameMap = {
@@ -329,17 +352,18 @@ const databaseColorsLight: Record<string, string> = {
  */
 function isLightMode(): boolean {
   try {
-    // Try Zotero's theme preference first (Zotero 7+)
-    const zoteroTheme = Zotero.Prefs.get('theme', true) as string | undefined
+    // Zotero's color scheme follows Firefox's toolbar-theme pref:
+    // 0 = light, 1 = dark, 2 = follow the system
+    const toolbarTheme = Zotero.Prefs.get('browser.theme.toolbar-theme', true) as number | undefined
 
-    if (zoteroTheme === 'light') {
+    if (toolbarTheme === 0) {
       return true
     }
-    if (zoteroTheme === 'dark') {
+    if (toolbarTheme === 1) {
       return false
     }
 
-    // If theme is 'system' or undefined, check system preference
+    // 'auto' or unset: check system preference
     const win = Zotero.getMainWindow()
     if (win) {
       const mediaQuery = win.matchMedia?.('(prefers-color-scheme: dark)')
@@ -404,7 +428,7 @@ function registerThemeObservers(): void {
   try {
     // Observe Zotero's theme preference changes
     themePrefObserverId = Zotero.Prefs.registerObserver(
-      'theme',
+      'browser.theme.toolbar-theme',
       () => {
         ztoolkit.log('Zotero theme preference changed')
         refreshItemsTree()
@@ -669,21 +693,16 @@ class Core {
       const escapedTag = escapeRegex(tagName)
 
       // Pattern 1: Current format "Citations: N (SourceName) [YYYY-MM-DD]"
-      const pattNew = new RegExp(
-        `^Citations: *(\\d+) *\\(${escapedTag}\\) *\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\]`, 'i'
-      )
+      const pattNew = new RegExp(`^Citations: *(\\d+) *\\(${escapedTag}\\) *\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\]`, 'i')
       // Pattern 2: Current format without date "Citations: N (SourceName)"
-      const pattNewNoDate = new RegExp(
-        `^Citations: *(\\d+) *\\(${escapedTag}\\)`, 'i'
-      )
+      const pattNewNoDate = new RegExp(`^Citations: *(\\d+) *\\(${escapedTag}\\)`, 'i')
       // Pattern 3: Old format "N citations (SourceName/IDType) [YYYY-MM-DD]"
       const pattOld = new RegExp(
-        `^(\\d+) citations \\(${escapedTag}(?:\\/\\w+)?\\) *(?:\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\])?`, 'i'
+        `^(\\d+) citations \\(${escapedTag}(?:\\/\\w+)?\\) *(?:\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\])?`,
+        'i',
       )
       // Pattern 4: Very old format "Citations (SourceName): N"
-      const pattVeryOld = new RegExp(
-        `^Citations \\(${escapedTag}\\): *(\\d+)`, 'i'
-      )
+      const pattVeryOld = new RegExp(`^Citations \\(${escapedTag}\\): *(\\d+)`, 'i')
 
       for (const line of extras) {
         let count: number | null = null
@@ -761,16 +780,13 @@ class Core {
       const escapedTag = escapeRegex(tagName)
 
       // Current format: "FWCI: N.NN (SourceName) [YYYY-MM-DD]"
-      const pattNew = new RegExp(
-        `^FWCI: *(\\d+\\.?\\d*) *\\(${escapedTag}\\) *\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\]`, 'i'
-      )
+      const pattNew = new RegExp(`^FWCI: *(\\d+\\.?\\d*) *\\(${escapedTag}\\) *\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\]`, 'i')
       // Without date: "FWCI: N.NN (SourceName)"
-      const pattNoDate = new RegExp(
-        `^FWCI: *(\\d+\\.?\\d*) *\\(${escapedTag}\\)`, 'i'
-      )
+      const pattNoDate = new RegExp(`^FWCI: *(\\d+\\.?\\d*) *\\(${escapedTag}\\)`, 'i')
       // Old zotero-cc format: "FWCI: N.NN (SourceName/IDType) [YYYY-MM-DD]"
       const pattOld = new RegExp(
-        `^FWCI: *(\\d+\\.?\\d*) *\\(${escapedTag}(?:\\/\\w+)?\\) *(?:\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\])?`, 'i'
+        `^FWCI: *(\\d+\\.?\\d*) *\\(${escapedTag}(?:\\/\\w+)?\\) *(?:\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\])?`,
+        'i',
       )
 
       for (const line of extras) {
@@ -820,9 +836,7 @@ class Core {
     if (!dateStr) return null
 
     // Try YYYY-MM-DD, YYYY/MM/DD, YYYY.MM.DD
-    const fullDateMatch = dateStr.match(
-      /\b(1[0-9]{3}|20[0-9]{2}|2100)[-\/.](\d{1,2})[-\/.](\d{1,2})\b/
-    )
+    const fullDateMatch = dateStr.match(/\b(1[0-9]{3}|20[0-9]{2}|2100)[-\/.](\d{1,2})[-\/.](\d{1,2})\b/)
     if (fullDateMatch) {
       const year = parseInt(fullDateMatch[1], 10)
       const month = parseInt(fullDateMatch[2], 10)
@@ -833,9 +847,7 @@ class Core {
     }
 
     // Try YYYY-MM or YYYY/MM
-    const yearMonthMatch = dateStr.match(
-      /\b(1[0-9]{3}|20[0-9]{2}|2100)[-\/.](\d{1,2})\b/
-    )
+    const yearMonthMatch = dateStr.match(/\b(1[0-9]{3}|20[0-9]{2}|2100)[-\/.](\d{1,2})\b/)
     if (yearMonthMatch) {
       const year = parseInt(yearMonthMatch[1], 10)
       const month = parseInt(yearMonthMatch[2], 10)
@@ -880,36 +892,43 @@ class Core {
       const escapedTag = escapeRegex(tagName)
 
       // Same four patterns as getCitationCountForColumn
-      const pattNew = new RegExp(
-        `^Citations: *(\\d+) *\\(${escapedTag}\\) *\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\]`, 'i'
-      )
-      const pattNewNoDate = new RegExp(
-        `^Citations: *(\\d+) *\\(${escapedTag}\\)`, 'i'
-      )
+      const pattNew = new RegExp(`^Citations: *(\\d+) *\\(${escapedTag}\\) *\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\]`, 'i')
+      const pattNewNoDate = new RegExp(`^Citations: *(\\d+) *\\(${escapedTag}\\)`, 'i')
       const pattOld = new RegExp(
-        `^(\\d+) citations \\(${escapedTag}(?:\\/\\w+)?\\) *(?:\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\])?`, 'i'
+        `^(\\d+) citations \\(${escapedTag}(?:\\/\\w+)?\\) *(?:\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\])?`,
+        'i',
       )
-      const pattVeryOld = new RegExp(
-        `^Citations \\(${escapedTag}\\): *(\\d+)`, 'i'
-      )
+      const pattVeryOld = new RegExp(`^Citations \\(${escapedTag}\\): *(\\d+)`, 'i')
 
       for (const line of extras) {
         let count: number | null = null
         let dateStr: string | null = null
 
         let match = pattNew.exec(line)
-        if (match) { count = parseInt(match[1]); dateStr = match[2] || null }
+        if (match) {
+          count = parseInt(match[1])
+          dateStr = match[2] || null
+        }
         if (count === null) {
           match = pattNewNoDate.exec(line)
-          if (match) { count = parseInt(match[1]); dateStr = null }
+          if (match) {
+            count = parseInt(match[1])
+            dateStr = null
+          }
         }
         if (count === null) {
           match = pattOld.exec(line)
-          if (match) { count = parseInt(match[1]); dateStr = match[2] || null }
+          if (match) {
+            count = parseInt(match[1])
+            dateStr = match[2] || null
+          }
         }
         if (count === null) {
           match = pattVeryOld.exec(line)
-          if (match) { count = parseInt(match[1]); dateStr = null }
+          if (match) {
+            count = parseInt(match[1])
+            dateStr = null
+          }
         }
 
         if (count !== null) {
@@ -1021,12 +1040,11 @@ class Core {
 
       // "AvgCite: N.NN (SourceName) [YYYY-MM-DD]"
       const pattNew = new RegExp(
-        `^AvgCite: *(\\d+\\.?\\d*) *\\(${escapedTag}\\) *\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\]`, 'i'
+        `^AvgCite: *(\\d+\\.?\\d*) *\\(${escapedTag}\\) *\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\]`,
+        'i',
       )
       // "AvgCite: N.NN (SourceName)" without date
-      const pattNoDate = new RegExp(
-        `^AvgCite: *(\\d+\\.?\\d*) *\\(${escapedTag}\\)`, 'i'
-      )
+      const pattNoDate = new RegExp(`^AvgCite: *(\\d+\\.?\\d*) *\\(${escapedTag}\\)`, 'i')
 
       for (const line of extras) {
         let match = pattNew.exec(line)
@@ -1609,12 +1627,16 @@ function updateNextItem(operations?: string[] | string, silent: boolean = false)
  * @param item Zotero item to update
  * @param operation Citation source to use
  * @param isAutoUpdate Whether this is called from auto-update (to respect unlisted cache)
+ * @param advanceQueue Whether to advance the shared manual-update queue after this
+ *   item. Callers that drive their own queue (auto-update) must pass false, otherwise
+ *   they would silently process leftovers of the last manual run.
  */
 async function updateItem(
   item: Zotero.Item,
   operations?: string[] | string,
   silent: boolean = false,
   isAutoUpdate: boolean = false,
+  advanceQueue: boolean = true,
 ) {
   try {
     ztoolkit.log('Citation debug - Updating item:', item.id, 'title:', item.getField('title'))
@@ -1690,8 +1712,10 @@ async function updateItem(
     ztoolkit.log('Error updating citation count for item', e)
   }
 
-  // Process next item
-  void updateNextItem(operations, silent)
+  // Process next item in the manual queue
+  if (advanceQueue) {
+    void updateNextItem(operations, silent)
+  }
 }
 
 class BasicRegistrar {
@@ -1720,51 +1744,17 @@ class UIRegistrar {
       flex: 0,
       zoteroPersist: ['width', 'ordinal', 'hidden', 'sortDirection'],
       dataProvider: (item: Zotero.Item) => {
-        ztoolkit.log('Citation debug - Data provider called for item:', item.id)
-
-        // Debug the raw item info
-        try {
-          ztoolkit.log('Citation debug - Item fields available:', Object.keys(item))
-          ztoolkit.log('Citation debug - Item type:', item.itemTypeID, item.itemType)
-
-          // // Log all available fields for this item
-          // const fields = Zotero.ItemFields.getItemTypeFields(item.itemTypeID)
-          // ztoolkit.log('Citation debug - Available fields:', fields)
-
-          // // Check if the item has extra field data
-          // if (item.hasOwnProperty('_extraFields')) {
-          //   ztoolkit.log('Citation debug - Extra fields:', JSON.stringify(item._extraFields))
-          // } else {
-          //   ztoolkit.log('Citation debug - Extra fields - not found')
-          // }
-
-          // // Check for the DCounts field mentioned in the error
-          // if (item.hasOwnProperty('_fieldData')) {
-          //   ztoolkit.log('Citation debug - Field data:', JSON.stringify(item._fieldData))
-          // } else {
-          //   ztoolkit.log('Citation debug - Field data - not found')
-          // }
-
-          // Check for parent item if this is a child item
-          if (item.isAttachment() || item.isNote()) {
-            const parentItemID = item.parentItemID
-            ztoolkit.log('Citation debug - Parent item ID:', parentItemID)
-            if (parentItemID) {
-              const parentItem = Zotero.Items.get(parentItemID)
-              ztoolkit.log('Citation debug - Parent item type:', parentItem.itemTypeID)
-            }
-          }
-        } catch (error) {
-          ztoolkit.log('Citation debug - Error inspecting item:', error)
-        }
-
         const result = Core.getCitationCountForColumn(item)
-        // Return JSON string that renderCell will parse
-        return result ? JSON.stringify(result) : ''
+        if (!result) {
+          return ''
+        }
+        // Zero-pad the counts so the tree's string-based sort is numeric;
+        // renderCell strips the padding for display.
+        const counts = result.counts.map((count) => (count === '-' ? count : count.padStart(SORT_PAD_WIDTH, '0')))
+        return JSON.stringify({ counts, databases: result.databases })
       },
       // iconPath: 'chrome://zotero/skin/citations.png',
       renderCell(index, data: any, column, isFirstColumn, doc) {
-        ztoolkit.log('Citation debug - Rendering cell with data:', data)
         const span = doc.createElement('span')
         span.className = `cell ${column.className}`
         span.style.textAlign = 'center'
@@ -1788,7 +1778,12 @@ class UIRegistrar {
         const dataToUse = parsedData || data
         const useColors = getPref('useColors') === 'color' && dataToUse.databases.length > 1
 
-        dataToUse.counts.forEach((count: string, idx: number) => {
+        // Strip the zero-padding used for sorting before displaying
+        const displayCounts = dataToUse.counts.map((count: string) =>
+          count === '-' ? count : String(parseInt(count, 10)),
+        )
+
+        displayCounts.forEach((count: string, idx: number) => {
           if (idx > 0) {
             const separator = doc.createElement('span')
             separator.innerText = ' | '
@@ -1809,7 +1804,7 @@ class UIRegistrar {
         const tooltip = dataToUse.databases
           .map((db: string, idx: number) => {
             const displayName = getOperationName(db)
-            return getString('tooltip-citation-tallies', { args: { displayName, count: dataToUse.counts[idx] } })
+            return getString('tooltip-citation-tallies', { args: { displayName, count: displayCounts[idx] } })
           })
           .join(', ')
         span.title = tooltip
@@ -1833,13 +1828,15 @@ class UIRegistrar {
       flex: 0,
       zoteroPersist: ['width', 'ordinal', 'hidden', 'sortDirection'],
       dataProvider: (item: Zotero.Item) => {
-        return Core.getFWCIForColumn(item)
+        const value = Core.getFWCIForColumn(item)
+        return value === '-' ? '-' : value.padStart(SORT_PAD_WIDTH, '0')
       },
       renderCell(index, data: any, column, isFirstColumn, doc) {
         const span = doc.createElement('span')
         span.className = `cell ${column.className}`
         span.style.textAlign = 'center'
-        span.innerText = data || '-'
+        const num = parseFloat(data)
+        span.innerText = data && !isNaN(num) ? num.toFixed(2) : '-'
         return span
       },
     })
@@ -1859,13 +1856,15 @@ class UIRegistrar {
       flex: 0,
       zoteroPersist: ['width', 'ordinal', 'hidden', 'sortDirection'],
       dataProvider: (item: Zotero.Item) => {
-        return Core.getAvgCiteForColumn(item)
+        const value = Core.getAvgCiteForColumn(item)
+        return value === '-' ? '-' : value.padStart(SORT_PAD_WIDTH, '0')
       },
       renderCell(index, data: any, column, isFirstColumn, doc) {
         const span = doc.createElement('span')
         span.className = `cell ${column.className}`
         span.style.textAlign = 'center'
-        span.innerText = data || '-'
+        const num = parseFloat(data)
+        span.innerText = data && !isNaN(num) ? num.toFixed(2) : '-'
         return span
       },
     })
@@ -1904,10 +1903,10 @@ class UIRegistrar {
 
   /**
    * Register context menu items to update citation counts for selected items.
-   * Uses MenuManager on Zotero 9, falls back to DOM injection on Zotero 7.
+   * Uses MenuManager on Zotero 8+, falls back to DOM injection on Zotero 7.
    */
   static registerCitationCountMenuItem() {
-    // Zotero 9 path: use MenuManager API
+    // Zotero 8+/9 path: use MenuManager API
     if ((Zotero as any).MenuManager?.registerMenu) {
       const showWhen = () => {
         try {
@@ -1921,6 +1920,12 @@ class UIRegistrar {
         }
       }
 
+      // MenuManager's onShowing cannot control visibility via its return value;
+      // visibility must be set on the context passed to the handler.
+      const onShowing = (_event: unknown, context: any) => {
+        context?.setVisible?.(showWhen())
+      }
+
       ;(Zotero as any).MenuManager.registerMenu({
         menuID: `${addon.data.config.addonID}-update-citations`,
         pluginID: addon.data.config.addonID,
@@ -1930,7 +1935,7 @@ class UIRegistrar {
             menuType: 'menuitem',
             l10nID: getLocaleID('menuitem-update-citation-tallies'),
             icon: 'chrome://zotero/skin/toolbar-advanced-search.png',
-            onShowing: showWhen,
+            onShowing,
             onCommand: () => addon.hooks.onDialogEvents('updateCitationCounts'),
           },
         ],
@@ -1952,6 +1957,7 @@ class UIRegistrar {
             {
               menuType: 'menuitem',
               l10nID: getLocaleID(`menuitem-update-${source.l10nSuffix}`),
+              onShowing,
               onCommand: () => addon.hooks.onDialogEvents(`updateCitationCounts-${source.key}`),
             },
           ],
@@ -1967,6 +1973,7 @@ class UIRegistrar {
           {
             menuType: 'menuitem',
             l10nID: getLocaleID('menuitem-update-avgcite'),
+            onShowing,
             onCommand: () => addon.hooks.onDialogEvents('updateCitationCounts-avgcite'),
           },
         ],
@@ -1975,13 +1982,10 @@ class UIRegistrar {
     }
 
     // Zotero 7 fallback: inject menuitems into the item context menu via DOM
-    if (UIRegistrar._zotero7MenuInjected) return
-    UIRegistrar._zotero7MenuInjected = true
-
     for (const win of Zotero.getMainWindows()) {
       const doc = win.document
       const itemMenu = doc.getElementById('zotero-itemmenu')
-      if (!itemMenu) continue
+      if (!itemMenu || UIRegistrar.isZotero7MenuInjected(itemMenu)) continue
 
       // Create separator
       const sep = doc.createXULElement?.('menuseparator') || doc.createElement('menuseparator')
@@ -2000,11 +2004,13 @@ class UIRegistrar {
         { key: 'semanticscholar', l10n: 'menuitem-update-semanticscholar' },
         { key: 'openalex', l10n: 'menuitem-update-openalex' },
       ]
+      const injected: Element[] = [sep, menuAll]
       for (const src of sourceDefs) {
         const menuItem = UIRegistrar._createZotero7MenuItem(doc, src.l10n, () => {
           addon.hooks.onDialogEvents(`updateCitationCounts-${src.key}`)
         })
         itemMenu.appendChild(menuItem)
+        injected.push(menuItem)
       }
 
       // Average citations per year (locally computed)
@@ -2012,10 +2018,11 @@ class UIRegistrar {
         addon.hooks.onDialogEvents('updateCitationCounts-avgcite')
       })
       itemMenu.appendChild(menuAvgCite)
+      injected.push(menuAvgCite)
+
+      UIRegistrar.markZotero7MenuInjected(...injected)
     }
   }
-
-  private static _zotero7MenuInjected = false
 
   /**
    * Helper: create a localized menuitem for Zotero 7 DOM injection
@@ -2028,21 +2035,73 @@ class UIRegistrar {
   }
 
   /**
-   * Register a menubar item to retally outdated item citations
+   * Register a menubar item to retally outdated item citations.
+   * Uses MenuManager on Zotero 8+, falls back to DOM injection on Zotero 7.
    */
   static registerRetallyCitationsMenuItem() {
-    ;(Zotero as any).MenuManager.registerMenu({
-      menuID: `${addon.data.config.addonID}-retally-citations`,
-      pluginID: addon.data.config.addonID,
-      target: 'main/menubar/tools',
-      menus: [
-        {
-          menuType: 'menuitem',
-          l10nID: getLocaleID('menuitem-retally-outdated-citations'),
-          onCommand: () => addon.hooks.onDialogEvents('retallyOutdatedCitations'),
-        },
-      ],
-    })
+    // Zotero 8+/9 path: use MenuManager API
+    if ((Zotero as any).MenuManager?.registerMenu) {
+      ;(Zotero as any).MenuManager.registerMenu({
+        menuID: `${addon.data.config.addonID}-retally-citations`,
+        pluginID: addon.data.config.addonID,
+        target: 'main/menubar/tools',
+        menus: [
+          {
+            menuType: 'menuitem',
+            l10nID: getLocaleID('menuitem-retally-outdated-citations'),
+            onCommand: () => addon.hooks.onDialogEvents('retallyOutdatedCitations'),
+          },
+        ],
+      })
+      return
+    }
+
+    // Zotero 7 fallback: inject into the Tools menubar popup via DOM
+    for (const win of Zotero.getMainWindows()) {
+      const doc = win.document
+      const toolsPopup = doc.getElementById('menu_ToolsPopup')
+      if (!toolsPopup) {
+        ztoolkit.log('Tools menupopup not found; retally menu item not registered')
+        continue
+      }
+      if (UIRegistrar.isZotero7MenuInjected(toolsPopup)) continue
+
+      const menuItem = UIRegistrar._createZotero7MenuItem(doc, 'menuitem-retally-outdated-citations', () => {
+        addon.hooks.onDialogEvents('retallyOutdatedCitations')
+      })
+      toolsPopup.appendChild(menuItem)
+      UIRegistrar.markZotero7MenuInjected(menuItem)
+    }
+  }
+
+  /**
+   * Attribute marking menu items injected into Zotero 7 menus by this plugin,
+   * so they can be found again for duplicate prevention and cleanup.
+   */
+  private static get zotero7InjectedAttr(): string {
+    return `data-${addon.data.config.addonRef}-injected`
+  }
+
+  private static isZotero7MenuInjected(container: Element): boolean {
+    return !!container.querySelector(`[${UIRegistrar.zotero7InjectedAttr}]`)
+  }
+
+  private static markZotero7MenuInjected(...elements: Element[]): void {
+    for (const element of elements) {
+      element.setAttribute(UIRegistrar.zotero7InjectedAttr, 'true')
+    }
+  }
+
+  /**
+   * Remove menu items injected into Zotero 7 menus (the MenuManager path is
+   * cleaned up by Zotero itself). Call on window unload and plugin shutdown.
+   */
+  static unregisterZotero7Menus(): void {
+    for (const win of Zotero.getMainWindows()) {
+      win.document
+        .querySelectorAll(`[${UIRegistrar.zotero7InjectedAttr}]`)
+        .forEach((element: Element) => element.remove())
+    }
   }
 }
 
@@ -2174,4 +2233,14 @@ class UX {
 }
 
 // Export functions needed by autoupdate module
-export { DBInterface, Core, Helpers, UIRegistrar, BasicRegistrar, UX, updateItem, scheduleMonthlyCleanup }
+export {
+  DBInterface,
+  Core,
+  Helpers,
+  UIRegistrar,
+  BasicRegistrar,
+  UX,
+  updateItem,
+  scheduleMonthlyCleanup,
+  stopMonthlyCleanup,
+}

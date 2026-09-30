@@ -356,11 +356,15 @@ function checkIfRunnable(): boolean {
 
 /**
  * Start automatic update process on startup if enabled
+ * @param silent Whether to suppress progress UI
+ * @param ignoreAutoUpdateMode Bypass the autoUpdate preference check. The startup
+ *   trigger only runs when the user opted in via preferences; the Tools-menu
+ *   retally action is an explicit request and must not be gated on that setting.
  */
-async function startAutomaticUpdate(silent: boolean = false) {
+async function startAutomaticUpdate(silent: boolean = false, ignoreAutoUpdateMode: boolean = false) {
   const autoUpdateMode = getPref('autoUpdate') || 'never'
 
-  if (autoUpdateMode !== 'startup') {
+  if (!ignoreAutoUpdateMode && autoUpdateMode !== 'startup') {
     return
   }
 
@@ -470,7 +474,9 @@ async function processAutoUpdateQueue(silent: boolean = false) {
       return
     }
 
-    await updateItem(item, undefined, true, true) // Pass isAutoUpdate=true
+    // advanceQueue=false: the auto-update queue drives its own progression and
+    // must not advance (or get entangled with) the manual-update queue
+    await updateItem(item, undefined, true, true, false)
 
     autoUpdateIndex++
 

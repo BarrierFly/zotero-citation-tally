@@ -1,5 +1,5 @@
 import { startAutomaticUpdate } from './modules/citationAutoupdate'
-import { BasicRegistrar, scheduleMonthlyCleanup, UIRegistrar, UX } from './modules/citationTally'
+import { BasicRegistrar, scheduleMonthlyCleanup, stopMonthlyCleanup, UIRegistrar, UX } from './modules/citationTally'
 /* PUBIGNORE 
 import {
   BasicExampleFactory,
@@ -120,12 +120,15 @@ async function onMainWindowLoad(win: _ZoteroTypes.MainWindow): Promise<void> {
 
 async function onMainWindowUnload(win: Window): Promise<void> {
   ztoolkit.unregisterAll()
+  UIRegistrar.unregisterZotero7Menus()
   addon.data.dialog?.window?.close()
 }
 
 function onShutdown(): void {
   ztoolkit.unregisterAll()
+  UIRegistrar.unregisterZotero7Menus()
   UIRegistrar.unregisterThemeObservers()
+  stopMonthlyCleanup()
   addon.data.dialog?.window?.close()
   // Remove addon object
   addon.data.alive = false
@@ -222,7 +225,8 @@ function onDialogEvents(type: string) {
       UX.updateSelectedItemsAvgCite()
       break
     case 'retallyOutdatedCitations':
-      void startAutomaticUpdate(false) // false = show progress UI
+      // Explicit menu action: show progress UI and bypass the autoUpdate mode check
+      void startAutomaticUpdate(false, true)
       break
     default:
       break
