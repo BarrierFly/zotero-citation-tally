@@ -5,6 +5,8 @@
 export type FluentMessageId =
   | 'auto-update-completed'
   | 'auto-update-connection-retry'
+  | 'auto-update-none'
+  | 'auto-update-scanning'
   | 'auto-update-stopped'
   | 'auto-update-title'
   | 'auto-update-updating-item'
@@ -67,6 +69,9 @@ export type FluentMessageId =
   | 'progress-item-counter'
   | 'progress-items-updated'
   | 'progress-no-valid-items'
+  | 'progress-step-preparing'
+  | 'progress-step-querying'
+  | 'progress-step-rate-limit'
   | 'startup-begin'
   | 'startup-finish'
   | 'startup-progress'

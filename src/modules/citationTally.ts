@@ -60,7 +60,7 @@ class RateLimitManager {
     }
   }
 
-  static async waitForRateLimit(database: string): Promise<void> {
+  static async waitForRateLimit(database: string, reporter?: StepReporter): Promise<void> {
     const delay = this.getDelay(database)
     const lastRequest = this.lastRequestTime[database] || 0
     const now = Date.now()
@@ -69,6 +69,9 @@ class RateLimitManager {
     if (timeSinceLastRequest < delay) {
       const waitTime = delay - timeSinceLastRequest
       ztoolkit.log(`Rate limiting ${database}: waiting ${waitTime}ms (${this.multipliers[database] || 1}x multiplier)`)
+      // Tell the progress window which API we are waiting for, so a long pause
+      // is not mistaken for a hang.
+      reporter?.(rateLimitStepText(database, waitTime))
       await new Promise((resolve) => setTimeout(resolve, waitTime))
     }
 
@@ -96,6 +99,13 @@ interface LookupResult {
   message?: string
   fwci?: number // Field-Weighted Citation Impact (OpenAlex)
 }
+
+/**
+ * Callback used to report fine-grained progress while a single item is being
+ * looked up. The text is a fully localized message describing the current step
+ * (e.g. which database is being queried or waited on).
+ */
+type StepReporter = (text: string) => void
 
 class IgnoredItemsManager {
   private static memoryCache = new Map<number, { databases: string[] }>() // Session-only cache for no_identifier
@@ -328,6 +338,23 @@ function getOperationName(key: string): string {
   } as const
   const fluentId = nameMap[key as keyof typeof nameMap]
   return fluentId ? getString(fluentId) : key
+}
+
+/**
+ * Localized progress text for "querying a database".
+ */
+function queryStepText(database: string): string {
+  return getString('progress-step-querying', { args: { displayName: getOperationName(database) } })
+}
+
+/**
+ * Localized progress text for an adaptive rate-limit wait.
+ */
+function rateLimitStepText(database: string, waitMs: number): string {
+  const seconds = Math.max(1, Math.ceil(waitMs / 1000))
+  return getString('progress-step-rate-limit', {
+    args: { displayName: getOperationName(database), seconds },
+  })
 }
 
 // Database colors for dark theme (default)
@@ -1092,7 +1119,7 @@ class DBInterface {
    * @param item Zotero item
    * @returns LookupResult with count and status
    */
-  static async getCrossrefCountEnhanced(item: Zotero.Item): Promise<LookupResult> {
+  static async getCrossrefCountEnhanced(item: Zotero.Item, reporter?: StepReporter): Promise<LookupResult> {
     const identifier = Helpers.getItemIdentifier(item)
     if (identifier?.type !== 'doi') {
       ztoolkit.log('Citation debug - No DOI found for item:', item.id)
@@ -1102,7 +1129,8 @@ class DBInterface {
     ztoolkit.log('Citation debug - Encoded DOI:', edoi)
 
     // Apply adaptive rate limiting
-    await RateLimitManager.waitForRateLimit('crossref')
+    await RateLimitManager.waitForRateLimit('crossref', reporter)
+    reporter?.(queryStepText('crossref'))
 
     let response: any = null
 
@@ -1192,7 +1220,7 @@ class DBInterface {
    * @param item Zotero item
    * @returns LookupResult with count and status
    */
-  static async getInspireCountEnhanced(item: Zotero.Item): Promise<LookupResult> {
+  static async getInspireCountEnhanced(item: Zotero.Item, reporter?: StepReporter): Promise<LookupResult> {
     const identifiers = Helpers.getAllItemIdentifiers(item)
     if (identifiers.length === 0) {
       ztoolkit.log('Citation debug - No DOI or arXiv ID found for item:', item.id)
@@ -1206,7 +1234,8 @@ class DBInterface {
       )
 
       // Apply adaptive rate limiting
-      await RateLimitManager.waitForRateLimit('inspire')
+      await RateLimitManager.waitForRateLimit('inspire', reporter)
+      reporter?.(queryStepText('inspire'))
 
       let response: any = null
 
@@ -1293,7 +1322,7 @@ class DBInterface {
    * @param item Zotero item
    * @returns LookupResult with count and status
    */
-  static async getSemanticScholarCountEnhanced(item: Zotero.Item): Promise<LookupResult> {
+  static async getSemanticScholarCountEnhanced(item: Zotero.Item, reporter?: StepReporter): Promise<LookupResult> {
     const identifiers = Helpers.getAllItemIdentifiers(item)
     if (identifiers.length === 0) {
       ztoolkit.log('Citation debug - No DOI or arXiv ID found for item:', item.id)
@@ -1307,7 +1336,8 @@ class DBInterface {
       )
 
       // Apply adaptive rate limiting
-      await RateLimitManager.waitForRateLimit('semanticscholar')
+      await RateLimitManager.waitForRateLimit('semanticscholar', reporter)
+      reporter?.(queryStepText('semanticscholar'))
 
       let response: any = null
 
@@ -1418,7 +1448,7 @@ class DBInterface {
    * @param item Zotero item
    * @returns LookupResult with count, status, and optional FWCI
    */
-  static async getOpenAlexCountEnhanced(item: Zotero.Item): Promise<LookupResult> {
+  static async getOpenAlexCountEnhanced(item: Zotero.Item, reporter?: StepReporter): Promise<LookupResult> {
     const identifier = Helpers.getItemIdentifier(item)
     if (identifier?.type !== 'doi') {
       ztoolkit.log('Citation debug - No DOI found for OpenAlex lookup:', item.id)
@@ -1438,7 +1468,8 @@ class DBInterface {
     }
 
     // Apply adaptive rate limiting
-    await RateLimitManager.waitForRateLimit('openalex')
+    await RateLimitManager.waitForRateLimit('openalex', reporter)
+    reporter?.(queryStepText('openalex'))
 
     const url = `https://api.openalex.org/works/https://doi.org/${encodeURIComponent(normalizedDoi)}?select=cited_by_count,fwci&mailto=openalex@citationtally.org`
     ztoolkit.log('Citation debug - Fetching from OpenAlex API:', url)
@@ -1520,15 +1551,68 @@ let currentIndex = -1
 let totalItems = 0
 let itemsToUpdate: Zotero.Item[] = []
 let updatedCount = 0
+// Incremented on every new manual run. In-flight callbacks from a superseded
+// run (user started another update) check it and bail out, so two chains cannot
+// interleave and close each other's progress window.
+let manualRunToken = 0
+
+// Line indexes inside the progress window:
+// 0 = item counter / overall status, 1 = current step (database being queried or waited on)
+const PROGRESS_LINE_STATUS = 0
+const PROGRESS_LINE_STEP = 1
+
+/**
+ * Change a line of a progress window, ignoring failures.
+ * The user can dismiss the window at any time (closeOnClick), after which
+ * updating a line throws — that must never abort the running update.
+ */
+function safeChangeLine(win: any, options: { text?: string; type?: string; progress?: number; idx?: number }): void {
+  if (!win) return
+  try {
+    win.changeLine(options)
+  } catch (e) {
+    ztoolkit.log('Failed to update progress window:', e)
+  }
+}
+
+/**
+ * Create the progress window used for manual citation updates.
+ * `closeTime: -1` is essential: the toolkit defaults to closing the window after
+ * 5 seconds, which would hide it while the run is still going. We close it
+ * explicitly when the queue finishes.
+ * @param initialText text for the status line
+ */
+function createProgressWindow(initialText: string): any {
+  return new ztoolkit.ProgressWindow(addon.data.config.addonName, {
+    closeOnClick: true,
+    closeTime: -1,
+  })
+    .createLine({
+      text: initialText,
+      type: 'default',
+      progress: 0,
+    })
+    .createLine({
+      text: getString('progress-step-preparing'),
+      type: 'default',
+    })
+    .show()
+}
 
 /**
  * Reset the state of the citation count update process
  */
 function resetState() {
   if (progressWindow) {
-    progressWindow.close()
+    try {
+      progressWindow.close()
+    } catch (e) {
+      ztoolkit.log('Failed to close progress window:', e)
+    }
     progressWindow = null
   }
+  // Invalidate callbacks still in flight from a previous run
+  manualRunToken++
   currentIndex = -1
   totalItems = 0
   itemsToUpdate = []
@@ -1565,14 +1649,9 @@ function updateItems(items: Zotero.Item[], operations?: string[] | string, silen
   itemsToUpdate = regularItems
 
   if (!silent) {
-    // Create progress window
-    progressWindow = new ztoolkit.ProgressWindow(addon.data.config.addonName)
-
-    progressWindow.createLine({
-      text: getString('progress-getting-citation-tallies'),
-      type: 'default',
-      progress: 0,
-    })
+    // Create and show the progress window up front: the user should see it as
+    // soon as the run starts, not only after the first item finished.
+    progressWindow = createProgressWindow(getString('progress-getting-citation-tallies'))
   }
 
   updateNextItem(operations, silent)
@@ -1582,18 +1661,29 @@ function updateItems(items: Zotero.Item[], operations?: string[] | string, silen
  * Process the next item in the queue
  * @param operation Citation source to use
  */
-function updateNextItem(operations?: string[] | string, silent: boolean = false) {
+function updateNextItem(operations?: string[] | string, silent: boolean = false, runToken: number = manualRunToken) {
+  // A newer manual run has started; this chain is stale and must not touch the
+  // shared queue or progress window any more.
+  if (runToken !== manualRunToken) return
+
   // Move to next item
   currentIndex++
 
   // Check if processing is complete
   if (currentIndex >= totalItems) {
     if (progressWindow) {
-      progressWindow.close()
+      try {
+        progressWindow.close()
+      } catch (e) {
+        ztoolkit.log('Failed to close progress window:', e)
+      }
       progressWindow = null
     }
     if (!silent) {
-      const successWindow = new ztoolkit.ProgressWindow(addon.data.config.addonName)
+      const successWindow = new ztoolkit.ProgressWindow(addon.data.config.addonName, {
+        closeOnClick: true,
+        closeTime: 4000,
+      })
 
       successWindow.createLine({
         text: getString('progress-items-updated', { args: { count: updatedCount } }),
@@ -1601,25 +1691,38 @@ function updateNextItem(operations?: string[] | string, silent: boolean = false)
         progress: 100,
       })
       successWindow.show()
-      successWindow.startCloseTimer(4000)
     }
     return
   }
 
-  // Update progress
-  const percent = Math.round((currentIndex / totalItems) * 100)
-  if (!silent && progressWindow) {
-    progressWindow.changeLine({
-      text: getString('progress-item-counter', { args: { current: currentIndex + 1, total: totalItems } }),
-      progress: percent,
-    })
-    progressWindow.show()
-  }
-
-  // Process current item
   const item = itemsToUpdate[currentIndex]
 
-  void updateItem(item, operations, silent, false) // Manual updates don't respect unlisted cache
+  // Update the status line (counter + overall progress) and reset the step line
+  if (!silent && progressWindow) {
+    const percent = Math.round((currentIndex / totalItems) * 100)
+    safeChangeLine(progressWindow, {
+      text: getString('progress-item-counter', { args: { current: currentIndex + 1, total: totalItems } }),
+      progress: percent,
+      idx: PROGRESS_LINE_STATUS,
+    })
+    safeChangeLine(progressWindow, {
+      text: getString('progress-step-preparing'),
+      type: 'default',
+      idx: PROGRESS_LINE_STEP,
+    })
+  }
+
+  // Report each lookup step into the progress window's second line
+  const onStep: StepReporter | undefined =
+    silent || !progressWindow
+      ? undefined
+      : (text: string) => {
+          if (runToken !== manualRunToken) return
+          safeChangeLine(progressWindow, { text, idx: PROGRESS_LINE_STEP })
+        }
+
+  // Process current item
+  void updateItem(item, operations, silent, false, true, onStep, runToken) // Manual updates don't respect unlisted cache
 }
 
 /**
@@ -1630,6 +1733,10 @@ function updateNextItem(operations?: string[] | string, silent: boolean = false)
  * @param advanceQueue Whether to advance the shared manual-update queue after this
  *   item. Callers that drive their own queue (auto-update) must pass false, otherwise
  *   they would silently process leftovers of the last manual run.
+ * @param onStep Optional callback receiving a localized description of the current
+ *   lookup step (e.g. which database is queried or rate-limit waited on).
+ * @param runToken Token of the manual run that queued this item (see manualRunToken).
+ *   Defaults are only used by callers that drive their own queue.
  */
 async function updateItem(
   item: Zotero.Item,
@@ -1637,6 +1744,8 @@ async function updateItem(
   silent: boolean = false,
   isAutoUpdate: boolean = false,
   advanceQueue: boolean = true,
+  onStep?: StepReporter,
+  runToken: number = manualRunToken,
 ) {
   try {
     ztoolkit.log('Citation debug - Updating item:', item.id, 'title:', item.getField('title'))
@@ -1644,69 +1753,74 @@ async function updateItem(
     const databases = Helpers.getDatabaseArray(operations)
     if (databases.length === 0) {
       ztoolkit.log('Citation debug - No databases configured, skipping item:', item.id)
-      return
-    }
+    } else {
+      const data: CountArray = []
+      for (const operation of databases) {
+        // Check if this item is marked as ignored for this database (auto-update only)
+        if (isAutoUpdate && IgnoredItemsManager.isIgnored(item.id, operation, true)) {
+          ztoolkit.log(`Citation debug - Skipping ${operation} for item ${item.id} (marked as ignored)`)
+          continue
+        }
 
-    const data: CountArray = []
-    for (const operation of databases) {
-      // Check if this item is marked as ignored for this database (auto-update only)
-      if (isAutoUpdate && IgnoredItemsManager.isIgnored(item.id, operation, true)) {
-        ztoolkit.log(`Citation debug - Skipping ${operation} for item ${item.id} (marked as ignored)`)
-        continue
-      }
+        let result: LookupResult
+        let displayName = ''
+        // Announce the lookup before dispatching: some databases return early
+        // (e.g. missing identifier), and the step line should still name them.
+        onStep?.(queryStepText(operation))
+        if (operation === 'crossref') {
+          ztoolkit.log('Citation debug - DOI:', item.getField('DOI'))
+          result = await DBInterface.getCrossrefCountEnhanced(item, onStep)
+          displayName = getOperationName(operation)
+        } else if (operation === 'inspire') {
+          result = await DBInterface.getInspireCountEnhanced(item, onStep)
+          displayName = getOperationName(operation)
+        } else if (operation === 'semanticscholar') {
+          result = await DBInterface.getSemanticScholarCountEnhanced(item, onStep)
+          displayName = getOperationName(operation)
+        } else if (operation === 'openalex') {
+          result = await DBInterface.getOpenAlexCountEnhanced(item, onStep)
+          displayName = getOperationName(operation)
+        } else {
+          continue
+        }
 
-      let result: LookupResult
-      let displayName = ''
-      if (operation === 'crossref') {
-        ztoolkit.log('Citation debug - DOI:', item.getField('DOI'))
-        result = await DBInterface.getCrossrefCountEnhanced(item)
-        displayName = getOperationName(operation)
-      } else if (operation === 'inspire') {
-        result = await DBInterface.getInspireCountEnhanced(item)
-        displayName = getOperationName(operation)
-      } else if (operation === 'semanticscholar') {
-        result = await DBInterface.getSemanticScholarCountEnhanced(item)
-        displayName = getOperationName(operation)
-      } else if (operation === 'openalex') {
-        result = await DBInterface.getOpenAlexCountEnhanced(item)
-        displayName = getOperationName(operation)
-      } else {
-        continue
-      }
+        // Handle the result and update tracking
+        if (result.status === 'not_found') {
+          ztoolkit.log(`Citation debug - ${operation} confirmed item ${item.id} as not found`)
+          IgnoredItemsManager.markAsIgnored(item.id, operation, 'not_found', true)
+        } else if (result.status === 'no_identifier') {
+          ztoolkit.log(`Citation debug - ${operation} no identifier for item ${item.id}`)
+          IgnoredItemsManager.markAsIgnored(item.id, operation, 'no_identifier', false)
+        } else if (result.status === 'success' && result.count >= 0) {
+          // Clear any previous ignored status on successful result
+          ztoolkit.log(`Citation debug - ${operation} success for item ${item.id}: count=${result.count}`)
+          IgnoredItemsManager.clearIgnoredItem(item.id, operation)
+          data.push({ title: displayName, count: result.count, fwci: result.fwci })
+        } else if (result.status === 'rate_limited') {
+          ztoolkit.log(`Citation debug - ${operation} rate limited for item ${item.id}: ${result.message}`)
+          // Don't mark as ignored for rate limits - purely temporary
+        } else if (result.status === 'api_error') {
+          ztoolkit.log(`Citation debug - ${operation} API error for item ${item.id}: ${result.message}`)
 
-      // Handle the result and update tracking
-      if (result.status === 'not_found') {
-        ztoolkit.log(`Citation debug - ${operation} confirmed item ${item.id} as not found`)
-        IgnoredItemsManager.markAsIgnored(item.id, operation, 'not_found', true)
-      } else if (result.status === 'no_identifier') {
-        ztoolkit.log(`Citation debug - ${operation} no identifier for item ${item.id}`)
-        IgnoredItemsManager.markAsIgnored(item.id, operation, 'no_identifier', false)
-      } else if (result.status === 'success' && result.count >= 0) {
-        // Clear any previous ignored status on successful result
-        ztoolkit.log(`Citation debug - ${operation} success for item ${item.id}: count=${result.count}`)
-        IgnoredItemsManager.clearIgnoredItem(item.id, operation)
-        data.push({ title: displayName, count: result.count, fwci: result.fwci })
-      } else if (result.status === 'rate_limited') {
-        ztoolkit.log(`Citation debug - ${operation} rate limited for item ${item.id}: ${result.message}`)
-        // Don't mark as ignored for rate limits - purely temporary
-      } else if (result.status === 'api_error') {
-        ztoolkit.log(`Citation debug - ${operation} API error for item ${item.id}: ${result.message}`)
-
-        // Track persistent API errors during autoupdate to prevent repeated attempts
-        if (isAutoUpdate) {
-          IgnoredItemsManager.markAsIgnored(item.id, operation, 'api_error', true)
+          // Track persistent API errors during autoupdate to prevent repeated attempts
+          if (isAutoUpdate) {
+            IgnoredItemsManager.markAsIgnored(item.id, operation, 'api_error', true)
+          }
         }
       }
-    }
 
-    ztoolkit.log('Citation debug - Retrieved count:', data)
+      ztoolkit.log('Citation debug - Retrieved count:', data)
 
-    if (data.length > 0) {
-      await Core.setCitationCount(item, data)
-      ztoolkit.log('Citation debug - Item saved with new citation count')
-      updatedCount++
-    } else {
-      ztoolkit.log('Citation debug - No valid count retrieved, skipping update')
+      if (data.length > 0) {
+        await Core.setCitationCount(item, data)
+        ztoolkit.log('Citation debug - Item saved with new citation count')
+        // Only count items for the manual queue summary; auto-update tracks its
+        // own counters and must not inflate the manual run's total. Ignore
+        // results belonging to a superseded run as well.
+        if (!isAutoUpdate && runToken === manualRunToken) updatedCount++
+      } else {
+        ztoolkit.log('Citation debug - No valid count retrieved, skipping update')
+      }
     }
   } catch (e) {
     ztoolkit.log('Error updating citation count for item', e)
@@ -1714,7 +1828,7 @@ async function updateItem(
 
   // Process next item in the manual queue
   if (advanceQueue) {
-    void updateNextItem(operations, silent)
+    void updateNextItem(operations, silent, runToken)
   }
 }
 
@@ -2198,41 +2312,55 @@ class UX {
       return
     }
 
-    const progressWindow = new ztoolkit.ProgressWindow(addon.data.config.addonName)
-    progressWindow.createLine({
-      text: getString('progress-getting-avgcite'),
-      type: 'default',
-      progress: 0,
+    // Local computation with no API calls: show the window immediately and keep
+    // it open until the loop finishes (the toolkit would otherwise auto-close
+    // it after 5s, which can happen while a big selection is still running).
+    const progressWindow = new ztoolkit.ProgressWindow(addon.data.config.addonName, {
+      closeOnClick: true,
+      closeTime: -1,
     })
+    progressWindow
+      .createLine({
+        text: getString('progress-getting-avgcite'),
+        type: 'default',
+        progress: 0,
+      })
+      .show()
 
     let updatedCount = 0
     for (let i = 0; i < regularItems.length; i++) {
       const item = regularItems[i]
       const percent = Math.round((i / regularItems.length) * 100)
-      progressWindow.changeLine({
+      safeChangeLine(progressWindow, {
         text: getString('progress-item-counter', { args: { current: i + 1, total: regularItems.length } }),
         progress: percent,
       })
-      progressWindow.show()
 
       const stored = await Core.computeAndSetAvgCiteForItem(item)
       if (stored) updatedCount++
     }
 
-    progressWindow.close()
+    try {
+      progressWindow.close()
+    } catch (e) {
+      ztoolkit.log('Failed to close progress window:', e)
+    }
 
-    const successWindow = new ztoolkit.ProgressWindow(addon.data.config.addonName)
+    const successWindow = new ztoolkit.ProgressWindow(addon.data.config.addonName, {
+      closeOnClick: true,
+      closeTime: 4000,
+    })
     successWindow.createLine({
       text: getString('progress-avgcite-updated', { args: { count: updatedCount } }),
       type: 'success',
       progress: 100,
     })
     successWindow.show()
-    successWindow.startCloseTimer(4000)
   }
 }
 
 // Export functions needed by autoupdate module
+export type { StepReporter }
 export {
   DBInterface,
   Core,
@@ -2241,6 +2369,7 @@ export {
   BasicRegistrar,
   UX,
   updateItem,
+  safeChangeLine,
   scheduleMonthlyCleanup,
   stopMonthlyCleanup,
 }

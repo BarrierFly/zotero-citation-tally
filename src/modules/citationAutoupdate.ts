@@ -1,7 +1,8 @@
 import { getString } from '../utils/locale'
 import { getPref } from '../utils/prefs'
 
-import { Helpers, updateItem } from './citationTally'
+import { Helpers, safeChangeLine, updateItem } from './citationTally'
+import type { StepReporter } from './citationTally'
 
 // Ignored items data type
 type IgnoredItemsData = Record<
@@ -117,6 +118,10 @@ let autoUpdateProgressWindow: any = null
 let autoUpdateRetryCount = 0
 const MAX_RETRIES = 3
 const RETRY_DELAY = 5000 // 5 seconds
+
+// Progress window line indexes (0 = item counter, 1 = current lookup step)
+const AUTO_PROGRESS_LINE_STATUS = 0
+const AUTO_PROGRESS_LINE_STEP = 1
 
 /**
  * Check if citation data is outdated based on user preferences
@@ -372,11 +377,58 @@ async function startAutomaticUpdate(silent: boolean = false, ignoreAutoUpdateMod
     return
   }
 
+  // Show the progress window before the library scan starts: finding outdated
+  // items is the first thing the user waits for.
+  if (!silent) {
+    autoUpdateProgressWindow = new ztoolkit.ProgressWindow(
+      getString('auto-update-title', { args: { addonName: addon.data.config.addonName } }),
+      {
+        closeOnClick: true,
+        closeTime: -1,
+      },
+    )
+
+    autoUpdateProgressWindow
+      .createLine({
+        text: getString('auto-update-scanning'),
+        type: 'default',
+        progress: 0,
+      })
+      .createLine({
+        text: getString('progress-step-preparing'),
+        type: 'default',
+      })
+      .show()
+  }
+
   try {
     const itemsToUpdate = await getItemsNeedingUpdate()
 
     if (itemsToUpdate.length === 0) {
       ztoolkit.log('Auto update: No items need updating')
+      if (autoUpdateProgressWindow) {
+        try {
+          autoUpdateProgressWindow.close()
+        } catch (e) {
+          ztoolkit.log('Auto update: failed to close progress window:', e)
+        }
+        autoUpdateProgressWindow = null
+      }
+      // Only report "up to date" for an explicit menu action; on startup it
+      // would just be noise.
+      if (!silent && ignoreAutoUpdateMode) {
+        const upToDateWindow = new ztoolkit.ProgressWindow(addon.data.config.addonName, {
+          closeOnClick: true,
+          closeTime: 4000,
+        })
+        upToDateWindow
+          .createLine({
+            text: getString('auto-update-none'),
+            type: 'success',
+            progress: 100,
+          })
+          .show()
+      }
       return
     }
 
@@ -391,34 +443,43 @@ async function startAutomaticUpdate(silent: boolean = false, ignoreAutoUpdateMod
 
     if (!checkIfRunnable()) {
       ztoolkit.log('Auto update: Not runnable, stopping')
+      autoUpdateInProgress = false
+      autoUpdateQueue = []
+      autoUpdateIndex = 0
+      autoUpdateRetryCount = 0
+      if (autoUpdateProgressWindow) {
+        try {
+          autoUpdateProgressWindow.close()
+        } catch (e) {
+          ztoolkit.log('Auto update: failed to close progress window:', e)
+        }
+        autoUpdateProgressWindow = null
+      }
       return
     }
 
-    // Start processing with a delay to allow Zotero to fully initialize
-    setTimeout(() => {
-      if (!silent) {
-        // Show progress window
-        autoUpdateProgressWindow = new ztoolkit.ProgressWindow(
-          getString('auto-update-title', { args: { addonName: addon.data.config.addonName } }),
-          {
-            closeOnClick: true,
-            closeTime: -1,
-          },
-        )
+    // Start processing immediately. There is no API work happening during a
+    // pre-run delay, so waiting 3s only makes the plugin look unresponsive.
+    if (!silent && autoUpdateProgressWindow) {
+      safeChangeLine(autoUpdateProgressWindow, {
+        text: getString('auto-update-updating-outdated', { args: { count: itemsToUpdate.length } }),
+        progress: 0,
+        idx: AUTO_PROGRESS_LINE_STATUS,
+      })
+    }
 
-        autoUpdateProgressWindow
-          .createLine({
-            text: getString('auto-update-updating-outdated', { args: { count: itemsToUpdate.length } }),
-            type: 'default',
-            progress: 0,
-          })
-          .show()
-      }
-
-      void processAutoUpdateQueue(silent)
-    }, 3000)
+    void processAutoUpdateQueue(silent)
   } catch (error) {
     ztoolkit.log('Auto update: Error getting items to update:', error)
+    autoUpdateInProgress = false
+    if (autoUpdateProgressWindow) {
+      try {
+        autoUpdateProgressWindow.close()
+      } catch (e) {
+        ztoolkit.log('Auto update: failed to close progress window:', e)
+      }
+      autoUpdateProgressWindow = null
+    }
   }
 }
 
@@ -458,13 +519,26 @@ async function processAutoUpdateQueue(silent: boolean = false) {
   }
 
   if (!silent && autoUpdateProgressWindow) {
-    autoUpdateProgressWindow?.changeLine({
+    safeChangeLine(autoUpdateProgressWindow, {
       text: getString('auto-update-updating-item', {
         args: { current: autoUpdateIndex + 1, total: autoUpdateQueue.length },
       }),
       progress: progress,
+      idx: AUTO_PROGRESS_LINE_STATUS,
+    })
+    safeChangeLine(autoUpdateProgressWindow, {
+      text: getString('progress-step-preparing'),
+      type: 'default',
+      idx: AUTO_PROGRESS_LINE_STEP,
     })
   }
+
+  // Report each lookup step (database queried / rate-limit wait) into the
+  // window's second line so long runs show what is currently happening.
+  const onStep: StepReporter | undefined =
+    silent || !autoUpdateProgressWindow
+      ? undefined
+      : (text: string) => safeChangeLine(autoUpdateProgressWindow, { text, idx: AUTO_PROGRESS_LINE_STEP })
 
   try {
     // Check network connectivity
@@ -476,12 +550,13 @@ async function processAutoUpdateQueue(silent: boolean = false) {
 
     // advanceQueue=false: the auto-update queue drives its own progression and
     // must not advance (or get entangled with) the manual-update queue
-    await updateItem(item, undefined, true, true, false)
+    await updateItem(item, undefined, true, true, false, onStep)
 
     autoUpdateIndex++
 
-    // No additional delay needed - adaptive rate limiting is handled in the database methods
-    setTimeout(() => void processAutoUpdateQueue(silent), 100)
+    // Yield to the event loop between items (0 ms, not a real delay) so the UI
+    // stays responsive; rate limiting is handled per database lookup.
+    setTimeout(() => void processAutoUpdateQueue(silent), 0)
   } catch (error) {
     ztoolkit.log('Auto update error:', error)
 
@@ -495,7 +570,7 @@ async function processAutoUpdateQueue(silent: boolean = false) {
 
     // For other errors, try to continue with next item
     autoUpdateIndex++
-    setTimeout(() => void processAutoUpdateQueue(silent), 100)
+    setTimeout(() => void processAutoUpdateQueue(silent), 0)
   }
 }
 
@@ -514,9 +589,10 @@ function scheduleRetry(silent: boolean = false) {
   ztoolkit.log(`Auto update: Retry ${autoUpdateRetryCount}/${MAX_RETRIES}`)
 
   if (!silent && autoUpdateProgressWindow) {
-    autoUpdateProgressWindow?.changeLine({
+    safeChangeLine(autoUpdateProgressWindow, {
       text: getString('auto-update-connection-retry', { args: { current: autoUpdateRetryCount, max: MAX_RETRIES } }),
       type: 'default',
+      idx: AUTO_PROGRESS_LINE_STATUS,
     })
   }
 
@@ -527,19 +603,26 @@ function scheduleRetry(silent: boolean = false) {
  * Finish the automatic update process
  */
 function finishAutomaticUpdate(errorMessage?: string, silent: boolean = false) {
-  autoUpdateInProgress = false
-
-  if (autoUpdateProgressWindow) {
-    autoUpdateProgressWindow.close()
-    autoUpdateProgressWindow = null
-  }
-
   const updatedCount = autoUpdateIndex
   const totalCount = autoUpdateQueue.length
 
+  autoUpdateInProgress = false
+
+  if (autoUpdateProgressWindow) {
+    try {
+      autoUpdateProgressWindow.close()
+    } catch (e) {
+      ztoolkit.log('Auto update: failed to close progress window:', e)
+    }
+    autoUpdateProgressWindow = null
+  }
+
   // Show completion message
   if (!silent) {
-    const completionWindow = new ztoolkit.ProgressWindow('Citation Tally - Auto Update')
+    const completionWindow = new ztoolkit.ProgressWindow(addon.data.config.addonName, {
+      closeOnClick: true,
+      closeTime: 5000,
+    })
 
     if (errorMessage) {
       completionWindow.createLine({
@@ -555,7 +638,6 @@ function finishAutomaticUpdate(errorMessage?: string, silent: boolean = false) {
       })
     }
     completionWindow.show()
-    completionWindow.startCloseTimer(5000)
   }
 
   // Reset state

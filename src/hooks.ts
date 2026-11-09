@@ -78,11 +78,8 @@ async function onMainWindowLoad(win: _ZoteroTypes.MainWindow): Promise<void> {
     })
     .show()
 
-  await new Promise((resolve) => setTimeout(resolve, 1000))
-  popupWin.changeLine({
-    progress: 30,
-    text: getString('startup-progress', { args: { percent: 30, message: getString('startup-begin') } }),
-  })
+  // No artificial startup delay: nothing is awaited here, so a sleep would only
+  // slow down Zotero startup and keep the progress window around.
 
   // UIExampleFactory.registerStyleSheet(win) // PUBIGNORE
 
@@ -109,11 +106,16 @@ async function onMainWindowLoad(win: _ZoteroTypes.MainWindow): Promise<void> {
 
   // await Zotero.Promise.delay(1000)
 
-  popupWin.changeLine({
-    progress: 100,
-    text: getString('startup-progress', { args: { percent: 100, message: getString('startup-finish') } }),
-  })
-  popupWin.startCloseTimer(1000)
+  try {
+    popupWin.changeLine({
+      progress: 100,
+      text: getString('startup-progress', { args: { percent: 100, message: getString('startup-finish') } }),
+    })
+    popupWin.startCloseTimer(1000)
+  } catch (e) {
+    // The user may have dismissed the window already (closeOnClick)
+    ztoolkit.log('Startup progress window already closed:', e)
+  }
 
   // addon.hooks.onDialogEvents('dialogExample')
 }
