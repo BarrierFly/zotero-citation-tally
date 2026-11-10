@@ -69,6 +69,7 @@ export type FluentMessageId =
   | 'progress-item-counter'
   | 'progress-items-updated'
   | 'progress-no-valid-items'
+  | 'progress-saving-counter'
   | 'progress-step-avgcite-reading'
   | 'progress-step-preparing'
   | 'progress-step-querying'

@@ -2383,9 +2383,13 @@ class UX {
 
     const pending: { item: Zotero.Item; entry: string }[] = []
 
+    // The run has two phases; split the bar between them so it keeps moving
+    // during the write phase instead of sitting at 100%.
+    const COMPUTE_PHASE_SHARE = 50
+
     for (let i = 0; i < regularItems.length; i++) {
       const item = regularItems[i]
-      const percent = Math.round((i / regularItems.length) * 100)
+      const percent = Math.round((i / regularItems.length) * COMPUTE_PHASE_SHARE)
       safeChangeLine(progressWindow, {
         text: getString('progress-item-counter', { args: { current: i + 1, total: regularItems.length } }),
         progress: percent,
@@ -2405,6 +2409,13 @@ class UX {
 
     let updatedCount = 0
     if (pending.length > 0) {
+      // The compute loop is over, so the status line would otherwise stay frozen
+      // at "item N of N" for the whole write phase. Show write progress instead.
+      safeChangeLine(progressWindow, {
+        text: getString('progress-saving-counter', { args: { current: 0, total: pending.length } }),
+        progress: COMPUTE_PHASE_SHARE,
+        idx: PROGRESS_LINE_STATUS,
+      })
       safeChangeLine(progressWindow, {
         text: getString('progress-step-saving'),
         type: 'default',
@@ -2414,9 +2425,16 @@ class UX {
       await yieldToUI()
 
       try {
+        let written = 0
         await Zotero.DB.executeTransaction(async () => {
           for (const { item, entry } of pending) {
             await Core.storeAvgCiteEntry(item, entry)
+            written++
+            safeChangeLine(progressWindow, {
+              text: getString('progress-saving-counter', { args: { current: written, total: pending.length } }),
+              progress: COMPUTE_PHASE_SHARE + Math.round((written / pending.length) * (100 - COMPUTE_PHASE_SHARE)),
+              idx: PROGRESS_LINE_STATUS,
+            })
           }
         })
         // Count only after the transaction committed; a rollback reports 0.
