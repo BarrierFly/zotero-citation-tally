@@ -637,10 +637,13 @@ class Core {
   /**
    * Store citation count in the Extra field
    * @param item Zotero item
-   * @param tag Citation source tag
-   * @param count Citation count number
+   * @param data citation counts to store
+   * @param onStep Optional callback receiving a localized description of the current step.
+   *   Only called when something is actually written — announcing "saving" for a
+   *   no-op (all entries already present for today) would be misleading.
+   * @returns true if the item was modified and saved, false otherwise
    */
-  static async setCitationCount(item: Zotero.Item, data: CountArray) {
+  static async setCitationCount(item: Zotero.Item, data: CountArray, onStep?: StepReporter): Promise<boolean> {
     let extra = item.getField('extra')
     if (!extra) {
       extra = ''
@@ -689,10 +692,13 @@ class Core {
 
     if (modified) {
       const newExtra = extras.join('\n')
+      onStep?.(getString('progress-step-saving'))
       item.setField('extra', newExtra)
-      await item.saveTx()
+      // skipSelect: batch updates must not keep moving the library selection
+      await item.saveTx({ skipSelect: true })
       ztoolkit.log('Citation debug - Updated Extra field')
     }
+    return modified
   }
 
   /**
@@ -974,28 +980,26 @@ class Core {
   }
 
   /**
-   * Compute and store average citations per year in the Extra field.
+   * Compute the average citations per year entry for an item without saving.
    * Uses the latest citation count (across all sources) divided by years since publication.
    * The endpoint for the time span is the citation count's own date (when the citation
    * data was fetched), not the current date — this keeps the metric stable and meaningful
    * even if the user recomputes it long after fetching.
    * @param item Zotero item
-   * @param onStep Optional callback receiving a localized description of the current step
-   * @returns true if a new entry was stored, false otherwise
+   * @returns the new Extra entry, or null if it cannot/should not be computed
    */
-  static async computeAndSetAvgCiteForItem(item: Zotero.Item, onStep?: StepReporter): Promise<boolean> {
-    onStep?.(getString('progress-step-avgcite-reading'))
+  static computeAvgCiteEntry(item: Zotero.Item): string | null {
     const extra = item.getField('extra') || ''
     const citationInfo = Core.findLatestCitationFromExtra(extra)
     if (!citationInfo) {
       ztoolkit.log('AvgCite debug - No citation data found for item:', item.id)
-      return false
+      return null
     }
 
     const pubDate = Core.getPublicationDate(item)
     if (pubDate === null) {
       ztoolkit.log('AvgCite debug - No publication year for item:', item.id)
-      return false
+      return null
     }
 
     // Parse the citation's date as the endpoint for the time span.
@@ -1038,15 +1042,46 @@ class Core {
     const extras = extra.split('\n')
     if (extras.includes(newEntry)) {
       ztoolkit.log('AvgCite debug - Skipping exact duplicate:', newEntry)
-      return false
+      return null
     }
 
+    return newEntry
+  }
+
+  /**
+   * Store a precomputed AvgCite entry in an item's Extra field.
+   * Separate from {@link computeAvgCiteEntry} so a batch run can compute every
+   * item first and then write them all inside one transaction.
+   * @param item Zotero item
+   * @param newEntry entry produced by computeAvgCiteEntry
+   */
+  static async storeAvgCiteEntry(item: Zotero.Item, newEntry: string): Promise<void> {
+    const extra = item.getField('extra') || ''
+    const extras = extra.split('\n')
+    if (extras.includes(newEntry)) return
+
     extras.unshift(newEntry)
-    const newExtra = extras.join('\n')
-    onStep?.(getString('progress-step-saving'))
-    item.setField('extra', newExtra)
-    await item.saveTx()
+    item.setField('extra', extras.join('\n'))
+    // skipSelect: batch updates must not keep moving the library selection
+    await item.saveTx({ skipSelect: true })
     ztoolkit.log('AvgCite debug - Stored avg cite:', newEntry)
+  }
+
+  /**
+   * Compute and store average citations per year in the Extra field.
+   * Convenience wrapper for a single item (one transaction per call). Batch
+   * callers should use computeAvgCiteEntry + a single batch transaction.
+   * @param item Zotero item
+   * @param onStep Optional callback receiving a localized description of the current step
+   * @returns true if a new entry was stored, false otherwise
+   */
+  static async computeAndSetAvgCiteForItem(item: Zotero.Item, onStep?: StepReporter): Promise<boolean> {
+    onStep?.(getString('progress-step-avgcite-reading'))
+    const newEntry = Core.computeAvgCiteEntry(item)
+    if (newEntry === null) return false
+
+    onStep?.(getString('progress-step-saving'))
+    await Core.storeAvgCiteEntry(item, newEntry)
     return true
   }
 
@@ -1784,6 +1819,7 @@ async function updateItem(
         // Announce the lookup before dispatching: some databases return early
         // (e.g. missing identifier), and the step line should still name them.
         onStep?.(queryStepText(operation))
+        const lookupStart = Date.now()
         if (operation === 'crossref') {
           ztoolkit.log('Citation debug - DOI:', item.getField('DOI'))
           result = await DBInterface.getCrossrefCountEnhanced(item, onStep)
@@ -1800,6 +1836,9 @@ async function updateItem(
         } else {
           continue
         }
+        ztoolkit.log(
+          `Citation timing - ${operation} lookup for item ${item.id} took ${Date.now() - lookupStart}ms (${result.status})`,
+        )
 
         // Handle the result and update tracking
         if (result.status === 'not_found') {
@@ -1829,11 +1868,12 @@ async function updateItem(
       ztoolkit.log('Citation debug - Retrieved count:', data)
 
       if (data.length > 0) {
-        // Saving can take a moment (item may be open in a reader); keep the step
-        // line honest instead of leaving the last database name on screen.
-        onStep?.(getString('progress-step-saving'))
-        await Core.setCitationCount(item, data)
-        ztoolkit.log('Citation debug - Item saved with new citation count')
+        // setCitationCount announces the save step itself, and only when it
+        // actually writes. Announcing it here would also fire for no-ops where
+        // today's entries already exist.
+        const saveStart = Date.now()
+        const wrote = await Core.setCitationCount(item, data, onStep)
+        ztoolkit.log(`Citation timing - saving item ${item.id} took ${Date.now() - saveStart}ms (wrote: ${wrote})`)
         // Only count items for the manual queue summary; auto-update tracks its
         // own counters and must not inflate the manual run's total. Ignore
         // results belonging to a superseded run as well.
@@ -2332,19 +2372,17 @@ class UX {
       return
     }
 
-    // Local computation with no API calls: show the window immediately and keep
-    // it open until the loop finishes (the toolkit would otherwise auto-close
-    // it after 5s, which can happen while a big selection is still running).
-    // It uses the same two lines as the citation updates so the current step
-    // (reading Extra, computing, saving) is always visible.
+    // Local computation with no API calls. Two phases so the step line reflects
+    // reality instead of being dominated by per-item transactions:
+    //   1. read + compute every item (fast, no I/O)
+    //   2. write all pending entries inside a single transaction
     const progressWindow = createStepProgressWindow(
       getString('progress-getting-avgcite'),
       getString('progress-step-preparing'),
     )
 
-    const onStep: StepReporter = (text: string) => safeChangeLine(progressWindow, { text, idx: PROGRESS_LINE_STEP })
+    const pending: { item: Zotero.Item; entry: string }[] = []
 
-    let updatedCount = 0
     for (let i = 0; i < regularItems.length; i++) {
       const item = regularItems[i]
       const percent = Math.round((i / regularItems.length) * 100)
@@ -2354,15 +2392,47 @@ class UX {
         idx: PROGRESS_LINE_STATUS,
       })
       safeChangeLine(progressWindow, {
-        text: getString('progress-step-preparing'),
+        text: getString('progress-step-avgcite-reading'),
         type: 'default',
         idx: PROGRESS_LINE_STEP,
       })
       // Let the window actually paint this item's lines before doing the work.
       await yieldToUI()
 
-      const stored = await Core.computeAndSetAvgCiteForItem(item, onStep)
-      if (stored) updatedCount++
+      const entry = Core.computeAvgCiteEntry(item)
+      if (entry) pending.push({ item, entry })
+    }
+
+    let updatedCount = 0
+    if (pending.length > 0) {
+      safeChangeLine(progressWindow, {
+        text: getString('progress-step-saving'),
+        type: 'default',
+        idx: PROGRESS_LINE_STEP,
+      })
+      // Paint the save label before the (single, synchronous-ish) write burst.
+      await yieldToUI()
+
+      try {
+        await Zotero.DB.executeTransaction(async () => {
+          for (const { item, entry } of pending) {
+            await Core.storeAvgCiteEntry(item, entry)
+          }
+        })
+        // Count only after the transaction committed; a rollback reports 0.
+        updatedCount = pending.length
+      } catch (e) {
+        ztoolkit.log('AvgCite debug - Batch save failed, reloading items:', e)
+        // A rollback leaves the in-memory items holding the unsaved Extra text.
+        // Reload them so they match the database again.
+        for (const { item } of pending) {
+          try {
+            await item.reload([], true)
+          } catch (reloadError) {
+            ztoolkit.log('AvgCite debug - Failed to reload item:', item.id, reloadError)
+          }
+        }
+      }
     }
 
     try {
