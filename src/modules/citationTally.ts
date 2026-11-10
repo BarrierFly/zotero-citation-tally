@@ -980,9 +980,11 @@ class Core {
    * data was fetched), not the current date — this keeps the metric stable and meaningful
    * even if the user recomputes it long after fetching.
    * @param item Zotero item
+   * @param onStep Optional callback receiving a localized description of the current step
    * @returns true if a new entry was stored, false otherwise
    */
-  static async computeAndSetAvgCiteForItem(item: Zotero.Item): Promise<boolean> {
+  static async computeAndSetAvgCiteForItem(item: Zotero.Item, onStep?: StepReporter): Promise<boolean> {
+    onStep?.(getString('progress-step-avgcite-reading'))
     const extra = item.getField('extra') || ''
     const citationInfo = Core.findLatestCitationFromExtra(extra)
     if (!citationInfo) {
@@ -1041,6 +1043,7 @@ class Core {
 
     extras.unshift(newEntry)
     const newExtra = extras.join('\n')
+    onStep?.(getString('progress-step-saving'))
     item.setField('extra', newExtra)
     await item.saveTx()
     ztoolkit.log('AvgCite debug - Stored avg cite:', newEntry)
@@ -1576,24 +1579,35 @@ function safeChangeLine(win: any, options: { text?: string; type?: string; progr
 }
 
 /**
- * Create the progress window used for manual citation updates.
+ * Hand control back to the event loop so the progress window can repaint.
+ * This is a 0 ms yield, not a delay: purely local loops (e.g. computing avg
+ * citations) would otherwise run to completion without the window ever drawing
+ * the intermediate step lines.
+ */
+function yieldToUI(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0))
+}
+
+/**
+ * Create the two-line progress window used by every update run.
  * `closeTime: -1` is essential: the toolkit defaults to closing the window after
  * 5 seconds, which would hide it while the run is still going. We close it
- * explicitly when the queue finishes.
- * @param initialText text for the status line
+ * explicitly when the run finishes.
+ * @param statusText text for line 0 (overall status / item counter)
+ * @param stepText text for line 1 (current step)
  */
-function createProgressWindow(initialText: string): any {
+function createStepProgressWindow(statusText: string, stepText: string): any {
   return new ztoolkit.ProgressWindow(addon.data.config.addonName, {
     closeOnClick: true,
     closeTime: -1,
   })
     .createLine({
-      text: initialText,
+      text: statusText,
       type: 'default',
       progress: 0,
     })
     .createLine({
-      text: getString('progress-step-preparing'),
+      text: stepText,
       type: 'default',
     })
     .show()
@@ -1651,7 +1665,10 @@ function updateItems(items: Zotero.Item[], operations?: string[] | string, silen
   if (!silent) {
     // Create and show the progress window up front: the user should see it as
     // soon as the run starts, not only after the first item finished.
-    progressWindow = createProgressWindow(getString('progress-getting-citation-tallies'))
+    progressWindow = createStepProgressWindow(
+      getString('progress-getting-citation-tallies'),
+      getString('progress-step-preparing'),
+    )
   }
 
   updateNextItem(operations, silent)
@@ -1812,6 +1829,9 @@ async function updateItem(
       ztoolkit.log('Citation debug - Retrieved count:', data)
 
       if (data.length > 0) {
+        // Saving can take a moment (item may be open in a reader); keep the step
+        // line honest instead of leaving the last database name on screen.
+        onStep?.(getString('progress-step-saving'))
         await Core.setCitationCount(item, data)
         ztoolkit.log('Citation debug - Item saved with new citation count')
         // Only count items for the manual queue summary; auto-update tracks its
@@ -2315,17 +2335,14 @@ class UX {
     // Local computation with no API calls: show the window immediately and keep
     // it open until the loop finishes (the toolkit would otherwise auto-close
     // it after 5s, which can happen while a big selection is still running).
-    const progressWindow = new ztoolkit.ProgressWindow(addon.data.config.addonName, {
-      closeOnClick: true,
-      closeTime: -1,
-    })
-    progressWindow
-      .createLine({
-        text: getString('progress-getting-avgcite'),
-        type: 'default',
-        progress: 0,
-      })
-      .show()
+    // It uses the same two lines as the citation updates so the current step
+    // (reading Extra, computing, saving) is always visible.
+    const progressWindow = createStepProgressWindow(
+      getString('progress-getting-avgcite'),
+      getString('progress-step-preparing'),
+    )
+
+    const onStep: StepReporter = (text: string) => safeChangeLine(progressWindow, { text, idx: PROGRESS_LINE_STEP })
 
     let updatedCount = 0
     for (let i = 0; i < regularItems.length; i++) {
@@ -2334,9 +2351,17 @@ class UX {
       safeChangeLine(progressWindow, {
         text: getString('progress-item-counter', { args: { current: i + 1, total: regularItems.length } }),
         progress: percent,
+        idx: PROGRESS_LINE_STATUS,
       })
+      safeChangeLine(progressWindow, {
+        text: getString('progress-step-preparing'),
+        type: 'default',
+        idx: PROGRESS_LINE_STEP,
+      })
+      // Let the window actually paint this item's lines before doing the work.
+      await yieldToUI()
 
-      const stored = await Core.computeAndSetAvgCiteForItem(item)
+      const stored = await Core.computeAndSetAvgCiteForItem(item, onStep)
       if (stored) updatedCount++
     }
 

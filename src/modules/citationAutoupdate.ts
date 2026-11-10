@@ -1,8 +1,7 @@
 import { getString } from '../utils/locale'
 import { getPref } from '../utils/prefs'
 
-import { Helpers, safeChangeLine, updateItem } from './citationTally'
-import type { StepReporter } from './citationTally'
+import { type StepReporter, Helpers, safeChangeLine, updateItem } from './citationTally'
 
 // Ignored items data type
 type IgnoredItemsData = Record<
