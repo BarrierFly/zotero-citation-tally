@@ -693,6 +693,8 @@ class Core {
     if (modified) {
       const newExtra = extras.join('\n')
       onStep?.(getString('progress-step-saving'))
+      // Give the window a chance to paint the save label before the write.
+      await yieldToUI()
       item.setField('extra', newExtra)
       // skipSelect: batch updates must not keep moving the library selection
       await item.saveTx({ skipSelect: true })
@@ -1062,8 +1064,13 @@ class Core {
 
     extras.unshift(newEntry)
     item.setField('extra', extras.join('\n'))
-    // skipSelect: batch updates must not keep moving the library selection
-    await item.saveTx({ skipSelect: true })
+    // skipSelect: batch updates must not keep moving the library selection.
+    // save() when already inside a transaction, so we don't nest a second one.
+    if (Zotero.DB.inTransaction()) {
+      await item.save({ skipSelect: true })
+    } else {
+      await item.saveTx({ skipSelect: true })
+    }
     ztoolkit.log('AvgCite debug - Stored avg cite:', newEntry)
   }
 
@@ -1598,6 +1605,11 @@ let manualRunToken = 0
 // 0 = item counter / overall status, 1 = current step (database being queried or waited on)
 const PROGRESS_LINE_STATUS = 0
 const PROGRESS_LINE_STEP = 1
+
+// How many items to save per transaction during a batch run. Each chunk commits
+// and then yields, so the progress counter can repaint between chunks. Kept
+// small so the counter advances in visible steps on large selections.
+const SAVE_CHUNK_SIZE = 5
 
 /**
  * Change a line of a progress window, ignoring failures.
@@ -2375,7 +2387,7 @@ class UX {
     // Local computation with no API calls. Two phases so the step line reflects
     // reality instead of being dominated by per-item transactions:
     //   1. read + compute every item (fast, no I/O)
-    //   2. write all pending entries inside a single transaction
+    //   2. write the pending entries in short committed chunks
     const progressWindow = createStepProgressWindow(
       getString('progress-getting-avgcite'),
       getString('progress-step-preparing'),
@@ -2421,35 +2433,44 @@ class UX {
         type: 'default',
         idx: PROGRESS_LINE_STEP,
       })
-      // Paint the save label before the (single, synchronous-ish) write burst.
+      // Paint the save label before the first write burst.
       await yieldToUI()
 
+      // Write in chunks, one transaction each. All writes must NOT be done in a
+      // single transaction: inside one transaction the awaits resolve as
+      // microtasks, so the UI never repaints and the counter appears stuck at 0.
+      // Committing per chunk also keeps transactions short.
+      let committed = 0
       try {
-        let written = 0
-        await Zotero.DB.executeTransaction(async () => {
-          for (const { item, entry } of pending) {
-            await Core.storeAvgCiteEntry(item, entry)
-            written++
-            safeChangeLine(progressWindow, {
-              text: getString('progress-saving-counter', { args: { current: written, total: pending.length } }),
-              progress: COMPUTE_PHASE_SHARE + Math.round((written / pending.length) * (100 - COMPUTE_PHASE_SHARE)),
-              idx: PROGRESS_LINE_STATUS,
-            })
-          }
-        })
-        // Count only after the transaction committed; a rollback reports 0.
+        for (let offset = 0; offset < pending.length; offset += SAVE_CHUNK_SIZE) {
+          const chunk = pending.slice(offset, offset + SAVE_CHUNK_SIZE)
+          await Zotero.DB.executeTransaction(async () => {
+            for (const { item, entry } of chunk) {
+              await Core.storeAvgCiteEntry(item, entry)
+            }
+          })
+          committed += chunk.length
+          safeChangeLine(progressWindow, {
+            text: getString('progress-saving-counter', { args: { current: committed, total: pending.length } }),
+            progress: COMPUTE_PHASE_SHARE + Math.round((committed / pending.length) * (100 - COMPUTE_PHASE_SHARE)),
+            idx: PROGRESS_LINE_STATUS,
+          })
+          // Yield a macrotask so the counter above actually becomes visible.
+          await yieldToUI()
+        }
         updatedCount = pending.length
       } catch (e) {
-        ztoolkit.log('AvgCite debug - Batch save failed, reloading items:', e)
-        // A rollback leaves the in-memory items holding the unsaved Extra text.
-        // Reload them so they match the database again.
-        for (const { item } of pending) {
+        ztoolkit.log('AvgCite debug - Batch save failed:', e)
+        // Already-committed chunks stay saved; reload the rest so their in-memory
+        // Extra text matches the database again.
+        for (const { item } of pending.slice(committed)) {
           try {
             await item.reload([], true)
           } catch (reloadError) {
             ztoolkit.log('AvgCite debug - Failed to reload item:', item.id, reloadError)
           }
         }
+        updatedCount = committed
       }
     }
 
