@@ -10,26 +10,31 @@
 <vbox onload="Zotero.__addonInstance__.hooks.onPrefsEvent('load', { window })">
   <groupbox>
     <label
-      value="Citation Databases"
+      data-l10n-id="pref-citation-databases"
+      data-l10n-attrs="value"
       style="font-weight: bold; margin-top: 10px; margin-left: 10px" />
     <html:div class="__addonRef__-pref-options-div">
       <groupbox>
-        <description style="margin: 5px 0">Enter 1-4 databases separated by commas </description>
+        <description
+          data-l10n-id="pref-database-instructions"
+          style="margin: 5px 0" />
         <html:div style="margin-bottom: 5px; min-height: 20px; margin-top: 5px; text-align: center; width: 100%">
-          Options: <html:code>crossref, semanticscholar, inspire, openalex</html:code>
+          <html:span data-l10n-id="pref-database-options" />
         </html:div>
         <hbox
           align="center"
           style="margin-bottom: 10px">
           <html:input
             type="text"
+            data-l10n-id="pref-database-placeholder"
+            data-l10n-attrs="placeholder"
             id="zotero-prefpane-__addonRef__-databaseOrderExposed"
             value="crossref"
-            style="flex: 1; min-width: 300px; padding: 4px"
-            placeholder="crossref, semanticscholar" />
+            style="flex: 1; min-width: 300px; padding: 4px" />
           <button
             id="zotero-prefpane-__addonRef__-validate-databases"
-            label="Validate"
+            data-l10n-id="pref-validate-button"
+            data-l10n-attrs="label"
             style="margin-left: 10px"
             oncommand="Zotero.__addonInstance__.hooks.onPrefsEvent('validateDatabases', { window })" />
         </hbox>
@@ -41,54 +46,64 @@
     </html:div>
 
     <label
-      value="Autoupdate Tallies"
+      data-l10n-id="pref-auto-update-settings"
+      data-l10n-attrs="value"
       style="font-weight: bold; margin-top: 10px; margin-left: 10px" />
     <html:div class="__addonRef__-pref-options-div">
       <groupbox>
-        <description>Automatically fetch citation tallies for new items</description>
+        <description data-l10n-id="pref-fetch-on-add" />
         <radiogroup
           id="zotero-prefpane-__addonRef__-fetchOnAdd"
           preference="fetchOnAdd">
           <radio
-            label="Fetch tallies when items are added"
+            data-l10n-id="pref-fetch-on-add-enabled"
+            data-l10n-attrs="label"
             value="true" />
           <radio
-            label="Don't fetch tallies for new items"
+            data-l10n-id="pref-fetch-on-add-disabled"
+            data-l10n-attrs="label"
             value="false" />
         </radiogroup>
 
-        <description style="margin-top: 8px">Automatically update citation tallies for items in your library</description>
+        <description
+          data-l10n-id="pref-auto-update-description"
+          style="margin-top: 8px" />
         <radiogroup
           id="zotero-prefpane-__addonRef__-autoUpdate"
           preference="autoUpdate">
           <radio
-            label="Don't auto-update"
+            data-l10n-id="pref-auto-update-never"
+            data-l10n-attrs="label"
             value="never" />
           <radio
-            label="Auto-update on startup"
+            data-l10n-id="pref-auto-update-startup"
+            data-l10n-attrs="label"
             value="startup" />
         </radiogroup>
 
-        <!-- <separator style="margin: 5px 0" /> -->
-
         <label
-          value="Update tallies older than:"
+          data-l10n-id="pref-auto-update-cutoff-label"
+          data-l10n-attrs="value"
           style="margin-top: 5px" />
         <menulist
           id="zotero-prefpane-__addonRef__-autoUpdateCutoff"
           preference="autoUpdateCutoff">
           <menupopup>
             <menuitem
-              label="3 months"
+              data-l10n-id="pref-auto-update-cutoff-3"
+              data-l10n-attrs="label"
               value="3" />
             <menuitem
-              label="6 months"
+              data-l10n-id="pref-auto-update-cutoff-6"
+              data-l10n-attrs="label"
               value="6" />
             <menuitem
-              label="12 months"
+              data-l10n-id="pref-auto-update-cutoff-12"
+              data-l10n-attrs="label"
               value="12" />
             <menuitem
-              label="24 months"
+              data-l10n-id="pref-auto-update-cutoff-24"
+              data-l10n-attrs="label"
               value="24" />
           </menupopup>
         </menulist>
@@ -96,19 +111,22 @@
     </html:div>
 
     <label
-      value="Display Options (requires restart)"
+      data-l10n-id="pref-color-settings"
+      data-l10n-attrs="value"
       style="font-weight: bold; margin-top: 10px; margin-left: 10px" />
     <html:div class="__addonRef__-pref-options-div">
       <groupbox>
-        <description>Color tallies in column</description>
+        <description data-l10n-id="pref-use-colors-description" />
         <radiogroup
           id="zotero-prefpane-__addonRef__-useColors"
           preference="useColors">
           <radio
-            label="Use colors for different databases"
+            data-l10n-id="pref-use-colors"
+            data-l10n-attrs="label"
             value="color" />
           <radio
-            label="Display without colors"
+            data-l10n-id="pref-no-colors"
+            data-l10n-attrs="label"
             value="nocolor" />
         </radiogroup>
       </groupbox>

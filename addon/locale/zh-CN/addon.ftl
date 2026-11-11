@@ -46,6 +46,7 @@ auto-update-none = 所有引用计数均为最新。
 auto-update-updating-outdated = 正在更新 { $count } 个过期引用...
 auto-update-updating-item = 正在更新项目 { $current } / { $total }
 auto-update-connection-retry = 连接问题，正在重试... ({ $current }/{ $max })
+auto-update-connection-error = 网络连接不可用。
 auto-update-stopped = 自动更新已停止：{ $error }
 auto-update-completed = 自动更新完成：{ $updated }/{ $total } 个项目已更新
 

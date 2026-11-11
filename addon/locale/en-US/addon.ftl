@@ -46,6 +46,7 @@ auto-update-none = All citation tallies are up to date.
 auto-update-updating-outdated = Updating { $count } outdated citations...
 auto-update-updating-item = Updating item { $current } of { $total }
 auto-update-connection-retry = Connection issue, retrying... ({ $current }/{ $max })
+auto-update-connection-error = No network connection.
 auto-update-stopped = Auto update stopped: { $error }
 auto-update-completed = Auto update completed: { $updated }/{ $total } items updated
 

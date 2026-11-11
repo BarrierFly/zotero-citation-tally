@@ -1,75 +1,77 @@
-[![GitHub release (latest by date)](https://img.shields.io/github/v/release/daeh/zotero-citation-tally?style=for-the-badge)](https://github.com/daeh/zotero-citation-tally/releases/latest) [![GitHub Downloads all releases](https://img.shields.io/github/downloads/daeh/zotero-citation-tally/total?style=for-the-badge&color=forestgreen)](https://github.com/daeh/zotero-citation-tally/releases/latest) [![GitHub Downloads (latest release)](https://img.shields.io/github/downloads/daeh/zotero-citation-tally/latest/total?style=for-the-badge)](https://github.com/daeh/zotero-citation-tally/releases/latest)
+[![GitHub release (latest by date)](https://img.shields.io/github/v/release/BarrierFly/zotero-citation-tally?style=for-the-badge)](https://github.com/BarrierFly/zotero-citation-tally/releases/latest) [![GitHub Downloads all releases](https://img.shields.io/github/downloads/BarrierFly/zotero-citation-tally/total?style=for-the-badge&color=forestgreen)](https://github.com/BarrierFly/zotero-citation-tally/releases/latest) [![GitHub Downloads (latest release)](https://img.shields.io/github/downloads/BarrierFly/zotero-citation-tally/latest/total?style=for-the-badge)](https://github.com/BarrierFly/zotero-citation-tally/releases/latest)
 
 # Citation Tally
 
-[![zotero target version](https://img.shields.io/badge/Zotero-9-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org) [![Using Zotero Plugin Template](https://img.shields.io/badge/Using-Zotero%20Plugin%20Template-blue?style=flat-square&logo=github)](https://github.com/windingwind/zotero-plugin-template)
+[![zotero target version](https://img.shields.io/badge/Zotero-7%20%7C%208%20%7C%209-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org) [![Using Zotero Plugin Template](https://img.shields.io/badge/Using-Zotero%20Plugin%20Template-blue?style=flat-square&logo=github)](https://github.com/windingwind/zotero-plugin-template)
 
 **_Displays citation counts, FWCI, and average citations per year for Zotero library items._**
 
 ![Screenshot](docs/assets/readme/screenshot.png)
 
-This is a plugin for [Zotero](https://www.zotero.org), a research source management tool. The _CitationTally_ plugin automatically fetches and displays citation counts for research papers in your library from multiple academic databases.
+This is a plugin for [Zotero](https://www.zotero.org), a research source management tool. The _Citation Tally_ plugin fetches and displays citation counts for research papers in your library from multiple academic databases.
 
 ## Plugin Functions
 
-- **Automatic Citation Tracking** - Fetches citation counts when new items are added to your library
+- **Citation tracking** - Fetches citation counts when new items are added (optional)
 - **Field-Weighted Citation Impact (FWCI)** - Displays FWCI from OpenAlex alongside citation counts
-- **Average Citations Per Year** - Computes and displays locally-calculated average citations per year (年均引用)
-- **Smart Auto-Updates** - Keeps citation data current with configurable update schedules
-- **Visual Integration** - Adds sortable "Citations", "FWCI", and "AvgCite/Yr" columns to your Zotero library view
-- **Multiple Databases** - Queries Crossref, Semantic Scholar, INSPIRE, and OpenAlex in configurable order
-- **Per-Source Updates** - Right-click menu allows updating citations from individual databases
-- **Intelligent Rate Limiting** - Respects API limits with adaptive throttling
-- **Persistent Storage** - Stores citation data in item's Extra field for sync compatibility
+- **Average Citations Per Year** - Computes and displays a locally-calculated average citations per year (年均引用)
+- **Startup retally** - Optionally refreshes outdated citations when Zotero starts
+- **Visual integration** - Adds sortable "Citations", "FWCI", and "AvgCite/Yr" columns to the item list
+- **Multiple databases** - Queries Crossref, Semantic Scholar, INSPIRE, and OpenAlex
+- **Per-source updates** - Right-click menu entries update selected items from one source or from all configured sources
+- **Adaptive rate limiting** - Adjusts request delays when an API reports rate limiting
+- **Persistent storage** - Stores citation data in the item's Extra field, so it syncs with the library
+- **Group libraries** - The startup scan covers the user library and all group libraries
 
-Please post any bugs, questions, or feature requests in the [GitHub issues](https://github.com/daeh/zotero-citation-tally/issues?q=is%3Aissue+is%3Aopen+sort%3Aupdated-desc).
+Please post bug reports, questions, or feature requests in the [GitHub issues](https://github.com/BarrierFly/zotero-citation-tally/issues?q=is%3Aissue+is%3Aopen+sort%3Aupdated-desc).
 
 ## Installation
 
-- Download the plugin (the `.xpi` file) from the [latest release](https://github.com/daeh/zotero-citation-tally/releases/latest)
+- Download the plugin (`.xpi` file) from the [latest release](https://github.com/BarrierFly/zotero-citation-tally/releases/latest)
 - Open Zotero
-- From `Tools -> Plugins`
+- Open `Tools -> Plugins`
 - Select `Install Plugin From File...` from the gear icon ⛭
-- Choose the `.xpi` file you downloaded (e.g. `citation-tally.xpi`)
+- Choose the downloaded `.xpi` file (for example `citation-tally.xpi`)
 - Restart Zotero
 
 > [!NOTE]
-> The last release with support for Zotero 7 was [`v0.0.11`](https://github.com/daeh/zotero-citation-tally/releases/tag/v0.0.11).
+> The last release supporting Zotero 7 was [`v0.0.11`](https://github.com/BarrierFly/zotero-citation-tally/releases/tag/v0.0.11).
 >
-> The last release with support for Zotero 8 was [`v0.0.12`](https://github.com/daeh/zotero-citation-tally/releases/tag/v0.0.12).
+> The last release supporting Zotero 8 was [`v0.0.12`](https://github.com/BarrierFly/zotero-citation-tally/releases/tag/v0.0.12).
 
 ## Setup and Configuration
 
-Once installed, the plugin will automatically begin tracking citation counts for items in your library.
+After installation, the plugin adds its columns and menu entries. Citation data is fetched only for items that have a supported identifier (DOI or arXiv ID).
 
 ### Initial Setup
 
-- **Plugin Activation**: After installation and restart, the plugin will automatically add a "Citations" column to your Zotero library view.
-  - The citation count column should automatically appear in your library view.
-    - (If you don't see the column, right click the column titles and check "Citations")
+- **Columns**: The plugin adds "Citations", "FWCI", and "AvgCite/Yr" columns to the item list.
+  - If a column is hidden, right-click the column header and enable it.
 
     ![show Citations column](docs/assets/readme/show-column.png)
 
-- **Preferences Access**: Configure the plugin by going to `Zotero -> Settings -> Citation Tally` on MacOS ( `Edit -> Preferences -> Citation Tally` on linux).
+- **Preferences**: Open `Zotero -> Settings -> Citation Tally` on macOS, or `Edit -> Settings -> Citation Tally` on Windows/Linux.
 
 ### Automatic Behavior
 
-- **New Items**: Citation counts are automatically fetched when items with DOIs or arXiv IDs are added
-- **Auto-Updates**: Can be configured to update outdated citations on Zotero startup
-- **Smart Scheduling**: Items are processed from newest to oldest based on when they were added to your library
+- **New items**: If enabled in preferences, citation counts are fetched when items with DOIs or arXiv IDs are added.
+- **Startup retally**: If enabled, the plugin scans the user library and all group libraries for citation entries that are missing or older than the configured cutoff. Only the outdated sources are queried for each item.
+- **Order**: Items are processed from newest to oldest based on the date they were added.
+- **Not-found backoff**: Only automatic runs record confirmed "not found" responses. Repeated misses are retried after 7, 30, 90, and then 180 days. Network errors, rate limits, and server errors are not recorded as "not found".
 
 ### Manual Actions
 
-- **Update Selected Items**: Right-click → "Update Citation Tallies"
-  - **_NB_** Manual updates bypass all retry restrictions and cooldown periods
+- **Update selected items**: Right-click → "Update Citation Tallies"
+  - Queries every configured database for the selected regular items.
+  - Manual updates bypass the not-found backoff and do not change it.
 
-- **Update from Specific Source**: Right-click → choose a per-source update (Crossref, INSPIRE, SemanticScholar, OpenAlex)
+- **Update from a specific source**: Right-click → choose Crossref, INSPIRE, SemanticScholar, or OpenAlex.
 
-- **Compute Avg Citations/Year**: Right-click → "更新年均引用" / "Update Avg Citations/Year"
-  - Locally computes average citations per year from existing citation data and publication date
+- **Compute average citations/year**: Right-click → "更新年均引用" / "Update Avg Citations/Year"
+  - Computed locally from existing citation data and the item's publication date.
 
-- **Update All Outdated**: Tools menu → "Retally outdated item citations"
-  - This runs at startup but you can also trigger it manually.
+- **Retally outdated citations**: Tools menu → "Retally outdated item citations"
+  - Runs the same outdated-item scan as the startup retally, but can be triggered at any time and works regardless of the automatic-update setting.
 
 ### Configuration Options
 
@@ -77,17 +79,17 @@ Once installed, the plugin will automatically begin tracking citation counts for
 
 <summary>Database Settings</summary>
 
-- **Database Priority Order**: Configure which databases to query and in what order. The plugin will try each database until it finds citation data.
-  - Default order: `crossref, semanticscholar`
-  - Available databases: `crossref`, `semanticscholar`, `inspire`, `openalex`
-  - You can reorder these based on your field and preferences
-  - For physics papers, you might prefer: `inspire, crossref, semanticscholar`
-  - For general academic papers: `crossref, semanticscholar`
-  - For FWCI data, include `openalex` in your database order
+- **Database order**: Configure which databases are queried and in what order.
+  - Default: `crossref, semanticscholar`
+  - Available: `crossref`, `semanticscholar`, `inspire`, `openalex`
+  - Every configured database is queried for each eligible item; the order determines query and display order.
+  - Crossref and OpenAlex need a regular DOI. INSPIRE and Semantic Scholar also accept arXiv IDs. arXiv DOIs (`10.48550/arXiv.*`) are treated as arXiv identifiers rather than Crossref/OpenAlex DOIs.
+  - For physics papers, for example: `inspire, crossref, semanticscholar`
+  - For FWCI data, include `openalex`
 
-- **Automatic Updates**: Enable automatic citation updates on startup for outdated items
-- **Adaptive Rate Limiting**: Smart rate limiting that starts with base delays and automatically increases up to 10x when rate limits are detected, then gradually decreases on success
-- **Database-Specific Rate Limits**: Configure individual base rate limits for each database (Crossref, INSPIRE, Semantic Scholar, OpenAlex)
+- **Automatic updates**: Off, or retally outdated citations once at startup.
+- **Retally cutoff**: Consider an entry outdated after 3, 6, 12, or 24 months.
+- **Fetch on add**: Whether new items are looked up automatically.
 
 </details>
 
@@ -97,67 +99,89 @@ Once installed, the plugin will automatically begin tracking citation counts for
 
 <summary>Common Issues</summary>
 
-- **No citation data found**: The plugin requires items to have DOIs, arXiv IDs, or other identifiers that databases can match. Journal articles, conference papers, and books with DOIs work best. Items like web pages, theses, or older publications without digital identifiers may not have citation data available in academic databases.
-- **Rate limiting**: The plugin aims to be respectful of the databases that make citation information available by adaptively throttling request frequency and avoiding unnecessary requests. It starts with base delays (1-3 seconds) and automatically increases delays up to 10x when rate limits are detected, then gradually decreases on successful requests. Large batch updates may take time but will complete automatically. The plugin keeps track of items that do not appear in databases and avoids requesting them frequently, but will periodically check to see these items have been added.
-- **Network issues**: Ensure Zotero has internet access and your firewall isn't blocking requests to academic databases.
+- **No citation data found**: The plugin needs a DOI or arXiv ID. Web pages, theses, and older publications without a digital identifier usually have no match in these databases.
+- **Rate limiting**: Requests are spaced with base delays (Crossref, INSPIRE, OpenAlex: 1 s; Semantic Scholar: 3 s). After a `429` response the delay is multiplied by 1.5 (up to 10×) and gradually reduced after successful requests. Large batch updates can take a while but run in the background.
+- **Network issues**: Ensure Zotero has internet access and that a firewall or proxy is not blocking the APIs. A failed request is retried a few times per item during automatic updates; it is never stored as a permanent "not found".
+- **Missing group-library data**: Startup retally scans group libraries, but Zotero must have synced those libraries before the scan begins.
 
 </details>
 
 <details>
 <summary>Advanced Features & Behavior</summary>
 
-### Intelligent Retry System
+### Retry System
 
-The plugin tracks items that fail to return citation data and intelligently schedules retries:
+For automatic updates, the plugin remembers confirmed `not_found` responses per item and database:
 
-- **Not Found Items**:
-  - 1st attempt: Wait 7 days
-  - 2nd attempt: Wait 30 days
-  - 3rd attempt: Wait 90 days
-  - 4+ attempts: Wait 180 days
-- **Manual Override**: Right-click updates bypass all retry restrictions
+- 1st miss: retry after 7 days
+- 2nd miss: retry after 30 days
+- 3rd miss: retry after 90 days
+- 4th and later: retry after 180 days
+
+A successful lookup clears the record for that source. Transient failures (network errors, rate limits, HTTP 5xx, unparsable responses) do not start or extend the backoff. Manual updates always bypass it.
 
 ### Adaptive Rate Limiting
 
-The plugin respects API limits with intelligent throttling:
-
-**Base Delays:**
-
-- Crossref: 1 second
+- Crossref: 1 second base delay
 - INSPIRE: 1 second
 - Semantic Scholar: 3 seconds
 - OpenAlex: 1 second
+- On rate limiting, the delay increases by 1.5× up to 10×; successful requests reduce it by 0.9×.
+- The limits are built in; there is no UI for editing them yet.
 
-**Adaptive Behavior:**
+### Data Storage
 
-- Increases delay by 1.5× on rate limit errors (up to 10× maximum)
-- Decreases by 0.9× on successful requests
-- Maintains separate multipliers for each database
+Citation data is appended to the item's Extra field in these formats:
+
+```text
+Citations: 42 (Crossref) [2025-01-02]
+FWCI: 1.25 (OpenAlex) [2025-01-02]
+AvgCite: 3.50 (Crossref) [2025-01-02]
+```
+
+- Existing user lines in Extra are never removed.
+- At most 20 plugin-generated lines are kept per entry type and source; the oldest are dropped first.
+- Database names are written as stable English labels so records remain readable when Zotero's UI language changes.
+- The records sync with the library and are readable by older releases.
 
 ### Performance Optimizations
 
-- **Session Caching**: Items without identifiers are cached for the session
-- **Progress Indicators**: Real-time updates during bulk operations
-- **Network Detection**: Pauses and retries when network is unavailable
-- **Automatic Cleanup**: Monthly removal of data for deleted library items
+- Parsed Extra data is cached per item while the item list repaints.
+- Library scans load items in chunks so large libraries do not block the UI.
+- Each item's Extra field is re-read under a write lock before updating, preventing concurrent manual, automatic, and fetch-on-add runs from overwriting each other.
+- Ignored-item records are kept in memory and written back in one debounced update.
+- Data for deleted library items is cleaned up once at startup and then at most once every 30 days.
 
 ### Supported Identifiers
 
-The plugin can fetch citations for items with:
+- DOIs (including `https://doi.org/...` and percent-encoded forms)
+- arXiv IDs, including new-style (`2201.02177`), old-style (`hep-th/9901001`), versioned, and URL forms
 
-- DOIs (Digital Object Identifiers)
-- arXiv IDs
-- INSPIRE record IDs
-- Semantic Scholar paper IDs
+Identifiers are read from the DOI, archiveID, reportNumber, Extra, URL, and callNumber fields.
 
 </details>
 
 ## Supported Databases
 
-- **[Crossref](https://www.crossref.org/)**: Comprehensive database for scholarly publications with DOIs
-- **[INSPIRE](https://inspirehep.net/)**: High-energy physics literature database
-- **[Semantic Scholar](https://www.semanticscholar.org/)**: AI-powered academic search engine with citation analysis
-- **[OpenAlex](https://openalex.org/)**: Open catalog of scholarly works providing citation counts and FWCI (Field-Weighted Citation Impact)
+- **[Crossref](https://www.crossref.org/)**: Scholarly publications registered with Crossref
+- **[INSPIRE](https://inspirehep.net/)**: High-energy physics literature
+- **[Semantic Scholar](https://www.semanticscholar.org/)**: Academic search engine with citation data
+- **[OpenAlex](https://openalex.org/)**: Open catalog providing citation counts and FWCI (Field-Weighted Citation Impact)
+
+## Privacy
+
+The plugin sends only the item's DOI or arXiv ID to the selected APIs. It has no telemetry and no account system. Citation counts are stored locally in Zotero and, like the rest of the item data, sync through the user's configured Zotero sync.
+
+## Development
+
+```bash
+yarn install
+yarn build       # build the XPI and type-check
+yarn test        # run the pure-function unit tests
+yarn lint:check  # check formatting and lint
+```
+
+The build output is written to `.scaffold/build/`.
 
 ## Related Projects
 
@@ -166,7 +190,7 @@ The plugin can fetch citations for items with:
 
 ## Notes
 
-[GitHub](https://github.com/daeh/zotero-citation-tally): Source code repository
+[GitHub](https://github.com/BarrierFly/zotero-citation-tally): source code repository
 
 This extension uses the [zotero-plugin-template](https://github.com/windingwind/zotero-plugin-template).
 
@@ -176,4 +200,4 @@ Distributed under the GNU Affero General Public License v3.0.
 
 ## Author
 
-[![Personal Website](https://img.shields.io/badge/personal%20website-daeh.info-orange?style=for-the-badge)](https://daeh.info) [![BlueSky](https://img.shields.io/badge/bsky-@dae.bsky.social-skyblue?style=for-the-badge&logo=bluesky)](https://bsky.app/profile/dae.bsky.social)
+[BarrierFly](https://github.com/BarrierFly)

@@ -1,5 +1,21 @@
 import { getLocaleID, getString } from '../utils/locale'
-import { getPref, setPref } from '../utils/prefs'
+import { getPref } from '../utils/prefs'
+
+import {
+  DATABASE_IDS,
+  DATABASE_STORAGE_NAMES,
+  extractIdentifiers,
+  formatDate,
+  normalizeArxivId,
+  normalizeDoi,
+  parseExtra,
+  pickLatestEntry,
+  trimExtraHistory,
+} from './citationData'
+import { fetchWithTimeout, readJson } from './http'
+import { IgnoredItemsStore } from './ignoredItems'
+
+import type { DatabaseId, ParsedExtra } from './citationData'
 
 // Default rate limits per database (in milliseconds)
 const DEFAULT_RATE_LIMITS: Record<string, number> = {
@@ -81,18 +97,6 @@ class RateLimitManager {
 
 // Citation source operations
 
-// Ignored items tracking
-type IgnoredItemsData = Record<
-  string, // Database ID
-  Record<
-    string, // Item ID
-    {
-      count: number // Number of times that the database returned "not_found" for the item
-      lastChecked: string // ISO date of last check
-    }
-  >
->
-
 interface LookupResult {
   count: number
   status: 'success' | 'not_found' | 'api_error' | 'no_identifier' | 'rate_limited'
@@ -107,229 +111,70 @@ interface LookupResult {
  */
 type StepReporter = (text: string) => void
 
-class IgnoredItemsManager {
-  private static memoryCache = new Map<number, { databases: string[] }>() // Session-only cache for no_identifier
-  private static loaded = false
-
-  private static loadPersistentData(): IgnoredItemsData {
-    if (!this.loaded) {
-      this.loaded = true
-    }
-    const data = getPref('ignoredItems')
-    if (!data) {
-      return {}
-    }
-    try {
-      return JSON.parse(data)
-    } catch (e) {
-      ztoolkit.log('Failed to parse ignoredItems pref, treating as empty:', e)
-      return {}
-    }
-  }
-
-  private static savePersistentData(data: IgnoredItemsData): void {
-    setPref('ignoredItems', JSON.stringify(data))
-  }
-
-  private static shouldRetryItem(count: number, lastChecked: string): boolean {
-    const now = new Date()
-    const lastCheck = new Date(lastChecked)
-    const timeDiff = now.getTime() - lastCheck.getTime()
-    const daysDiff = timeDiff / (1000 * 3600 * 24)
-
-    if (count === 1) {
-      return daysDiff > 7 // 1 week
-    } else if (count === 2) {
-      return daysDiff > 30 // 1 month
-    } else if (count === 3) {
-      return daysDiff > 90 // 3 months
-    } else if (count > 3) {
-      return daysDiff > 180 // 6 months
-    }
-    return true // Should retry if count is 0 or unexpected
-  }
-
-  static markAsIgnored(
-    itemId: number,
-    database: string,
-    reason: 'not_found' | 'no_identifier' | 'api_error',
-    persistent = true,
-  ): void {
-    if (reason === 'no_identifier') {
-      // Store in memory cache only for missing identifiers
-      const memoryInfo = this.memoryCache.get(itemId) || { databases: [] }
-      if (!memoryInfo.databases.includes(database)) {
-        memoryInfo.databases.push(database)
-      }
-      this.memoryCache.set(itemId, memoryInfo)
-      return
-    }
-
-    // Track 'not_found' and 'api_error' status persistently
-    if (persistent && (reason === 'not_found' || reason === 'api_error')) {
-      const data = this.loadPersistentData()
-      const itemKey = itemId.toString()
-
-      // Initialize database if not exists
-      if (!data[database]) {
-        data[database] = {}
-      }
-
-      // Initialize or update item data
-      if (!data[database][itemKey]) {
-        data[database][itemKey] = {
-          count: 1,
-          lastChecked: new Date().toISOString(),
-        }
-      } else {
-        data[database][itemKey].count++
-        data[database][itemKey].lastChecked = new Date().toISOString()
-      }
-
-      this.savePersistentData(data)
-    }
-  }
-
-  static isIgnored(itemId: number, database: string, autoUpdateOnly = false): boolean {
-    // If this is manual update, never skip
-    if (!autoUpdateOnly) {
-      return false
-    }
-
-    // Check memory cache first (for no_identifier items)
-    if (this.memoryCache.has(itemId)) {
-      return this.memoryCache.get(itemId)!.databases.includes(database)
-    }
-
-    // Check persistent storage for not_found items
-    const data = this.loadPersistentData()
-    const itemKey = itemId.toString()
-
-    if (data[database]?.[itemKey]) {
-      const itemData = data[database][itemKey]
-      // Check if enough time has passed to retry based on failure count
-      return !this.shouldRetryItem(itemData.count, itemData.lastChecked)
-    }
-
-    return false
-  }
-
-  static clearIgnoredItem(itemId: number, database?: string): void {
-    // Clear from memory cache
-    if (database) {
-      const memoryInfo = this.memoryCache.get(itemId)
-      if (memoryInfo) {
-        memoryInfo.databases = memoryInfo.databases.filter((db) => db !== database)
-        if (memoryInfo.databases.length === 0) {
-          this.memoryCache.delete(itemId)
-        }
-      }
-    } else {
-      this.memoryCache.delete(itemId)
-    }
-
-    // Clear from persistent storage
-    const data = this.loadPersistentData()
-    const itemKey = itemId.toString()
-
-    if (database) {
-      // Clear specific database-item combination
-      if (data[database]?.[itemKey]) {
-        delete data[database][itemKey]
-        // Clean up empty database objects
-        if (Object.keys(data[database]).length === 0) {
-          delete data[database]
-        }
-        this.savePersistentData(data)
-      }
-    } else {
-      // Clear item from all databases
-      let modified = false
-      for (const dbKey of Object.keys(data)) {
-        if (data[dbKey][itemKey]) {
-          delete data[dbKey][itemKey]
-          modified = true
-          // Clean up empty database objects
-          if (Object.keys(data[dbKey]).length === 0) {
-            delete data[dbKey]
-          }
-        }
-      }
-      if (modified) {
-        this.savePersistentData(data)
-      }
-    }
-  }
-
-  static cleanupNonExistentItems(): void {
-    const data = this.loadPersistentData()
-    let modified = false
-
-    for (const database of Object.keys(data)) {
-      for (const itemKey of Object.keys(data[database])) {
-        const itemId = parseInt(itemKey)
-        try {
-          const item = Zotero.Items.get(itemId)
-          if (!item || item.deleted) {
-            delete data[database][itemKey]
-            modified = true
-          }
-        } catch (e) {
-          // Item doesn't exist, remove it
-          delete data[database][itemKey]
-          modified = true
-        }
-      }
-
-      // Clean up empty database objects
-      if (Object.keys(data[database]).length === 0) {
-        delete data[database]
-        modified = true
-      }
-    }
-
-    if (modified) {
-      this.savePersistentData(data)
-      ztoolkit.log('Citation debug - Cleaned up ignored items for non-existent library items')
-    }
-  }
+export interface UpdateOutcome {
+  /** At least one configured database returned usable data. */
+  success: boolean
+  /** The item's Extra field was actually changed. */
+  wrote: boolean
+  /** At least one source failed for a temporary reason and may be retried. */
+  transient: boolean
+  statuses: Record<string, LookupResult['status']>
 }
 
-// Schedule monthly cleanup
-let cleanupTimer: NodeJS.Timeout | null = null
+// Schedule periodic cleanup. A 30-day `setTimeout` overflows the 32-bit timer
+// limit in Gecko and fires almost immediately, so the long period is expressed
+// as a daily check plus a persisted timestamp.
+const CLEANUP_CHECK_INTERVAL = 24 * 60 * 60 * 1000
+const CLEANUP_MIN_INTERVAL = 30 * 24 * 60 * 60 * 1000
+const CLEANUP_STARTUP_DELAY = 5000
+
+let cleanupInterval: ReturnType<typeof setInterval> | null = null
+let cleanupStartupTimeout: ReturnType<typeof setTimeout> | null = null
+
+async function runCleanupIfDue(force = false): Promise<void> {
+  if (!addon.data.alive) return
+  const lastCleanup = Number(getPref('lastIgnoredCleanup') || 0)
+  if (!force && Number.isFinite(lastCleanup) && Date.now() - lastCleanup < CLEANUP_MIN_INTERVAL) {
+    return
+  }
+  await IgnoredItemsStore.cleanupNonExistentItems()
+}
 
 function scheduleMonthlyCleanup() {
-  if (cleanupTimer) {
-    clearInterval(cleanupTimer)
-  }
+  stopMonthlyCleanup()
 
-  // Run cleanup every 30 days (30 * 24 * 60 * 60 * 1000 ms)
-  cleanupTimer = setInterval(
-    () => {
-      void IgnoredItemsManager.cleanupNonExistentItems()
-    },
-    30 * 24 * 60 * 60 * 1000,
-  )
+  cleanupStartupTimeout = setTimeout(() => {
+    cleanupStartupTimeout = null
+    void runCleanupIfDue(true)
+  }, CLEANUP_STARTUP_DELAY)
 
-  // Also run cleanup on startup
-  setTimeout(() => {
-    void IgnoredItemsManager.cleanupNonExistentItems()
-  }, 5000) // Delay 5 seconds after startup
+  cleanupInterval = setInterval(() => {
+    void runCleanupIfDue()
+  }, CLEANUP_CHECK_INTERVAL)
 }
 
 /**
- * Stop the scheduled cleanup (call on shutdown so the interval
- * does not outlive a disabled plugin).
+ * Stop the scheduled cleanup (call on shutdown so the timers do not outlive a
+ * disabled plugin).
  */
 function stopMonthlyCleanup() {
-  if (cleanupTimer) {
-    clearInterval(cleanupTimer)
-    cleanupTimer = null
+  if (cleanupInterval) {
+    clearInterval(cleanupInterval)
+    cleanupInterval = null
+  }
+  if (cleanupStartupTimeout) {
+    clearTimeout(cleanupStartupTimeout)
+    cleanupStartupTimeout = null
   }
 }
 
-// Operation display names (lazy-loaded to avoid startup issues)
+// Localized display names for the progress UI and column tooltips. The values
+// stored in Extra are the stable names from citationData.ts, not these labels.
+const operationNameCache = new Map<string, string>()
+
 function getOperationName(key: string): string {
+  const cached = operationNameCache.get(key)
+  if (cached) return cached
   const nameMap = {
     crossref: 'database-crossref',
     inspire: 'database-inspire',
@@ -337,7 +182,9 @@ function getOperationName(key: string): string {
     openalex: 'database-openalex',
   } as const
   const fluentId = nameMap[key as keyof typeof nameMap]
-  return fluentId ? getString(fluentId) : key
+  const name = fluentId ? getString(fluentId) : key
+  operationNameCache.set(key, name)
+  return name
 }
 
 /**
@@ -442,18 +289,24 @@ function refreshItemsTree(): void {
   }
 }
 
-// Store references for cleanup
+// Store references for cleanup. Observers are registered once per plugin
+// lifetime, not once per window; otherwise every extra Zotero window leaks
+// another set of observers.
 let themeMediaQueryList: MediaQueryList | null = null
+let themeMediaListener: (() => void) | null = null
 let themePrefObserverId: symbol | null = null
 let colorPrefObserverId: symbol | null = null
+let themeObserversRegistered = false
 
 /**
- * Register observers for theme and color preference changes
- * Listens to Zotero's theme preference, system theme, and plugin color preference
+ * Register observers for theme and color preference changes.
+ * Idempotent: safe to call from startup and from each window load.
  */
 function registerThemeObservers(): void {
+  if (themeObserversRegistered) return
+  themeObserversRegistered = true
+
   try {
-    // Observe Zotero's theme preference changes
     themePrefObserverId = Zotero.Prefs.registerObserver(
       'browser.theme.toolbar-theme',
       () => {
@@ -463,7 +316,6 @@ function registerThemeObservers(): void {
       true,
     )
 
-    // Observe plugin's useColors preference changes (need full pref name)
     colorPrefObserverId = Zotero.Prefs.registerObserver(
       `${addon.data.config.prefsPrefix}.useColors`,
       () => {
@@ -473,21 +325,22 @@ function registerThemeObservers(): void {
       true,
     )
 
-    // Observe system theme changes via matchMedia
     const win = Zotero.getMainWindow()
     if (win?.matchMedia) {
       const mql = win.matchMedia('(prefers-color-scheme: dark)')
       if (mql) {
         themeMediaQueryList = mql
-        mql.addEventListener('change', () => {
+        themeMediaListener = () => {
           ztoolkit.log('System theme changed')
           refreshItemsTree()
-        })
+        }
+        mql.addEventListener('change', themeMediaListener)
       }
     }
 
     ztoolkit.log('Theme and color observers registered')
   } catch (e) {
+    themeObserversRegistered = false
     ztoolkit.log(`Failed to register theme observers: ${String(e)}`)
   }
 }
@@ -505,25 +358,16 @@ function unregisterThemeObservers(): void {
       Zotero.Prefs.unregisterObserver(colorPrefObserverId)
       colorPrefObserverId = null
     }
-    // MediaQueryList listeners are automatically cleaned up when the window closes
+    if (themeMediaQueryList && themeMediaListener) {
+      themeMediaQueryList.removeEventListener('change', themeMediaListener)
+    }
     themeMediaQueryList = null
+    themeMediaListener = null
+    themeObserversRegistered = false
     ztoolkit.log('Theme observers unregistered')
   } catch (e) {
     ztoolkit.log(`Failed to unregister theme observers: ${String(e)}`)
   }
-}
-
-function insertBeforeMatch(arr: string[], pattern: RegExp, newItem: string): void {
-  const index = arr.findIndex((item) => pattern.test(item))
-  if (index !== -1) {
-    arr.splice(index, 0, newItem)
-  } else {
-    arr.push(newItem) // If no match, append at the end
-  }
-}
-
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 class Helpers {
@@ -533,66 +377,14 @@ class Helpers {
    * @returns Array of objects with type and id, ordered by preference
    */
   static getAllItemIdentifiers(item: Zotero.Item): { type: string; id: string; source: string }[] {
-    const identifiers: { type: string; id: string; source: string }[] = []
-
-    // Regex for extracting arXiv IDs from text fields (handles "arXiv:0803.3042" or "0803.3042")
-    const arXivIdRegex = /(?:arXiv:\s*)?([a-z-]+\/\d+|\d+\.\d+)/i
-
-    // Regex for extracting arXiv IDs from URLs (handles "http://arxiv.org/abs/0803.3042")
-    const arXivUrlRegex = /arxiv\.org\/abs\/([a-z-]+\/\d+|\d+\.\d+)/i
-
-    // Check DOI field first (highest priority)
-    const doi = item.getField('DOI')
-    if (doi) {
-      identifiers.push({ type: 'doi', id: doi, source: 'DOI' })
-    }
-
-    // Check archiveID field (primary field for preprint identifiers)
-    const archiveID = item.getField('archiveID')
-    if (archiveID) {
-      const arXivMatch = arXivIdRegex.exec(archiveID)
-      if (arXivMatch) {
-        identifiers.push({ type: 'arxiv', id: arXivMatch[1], source: 'archiveID' })
-      }
-    }
-
-    // Check reportNumber field (often used for arXiv IDs)
-    const reportNumber = item.getField('reportNumber')
-    if (reportNumber) {
-      const arXivMatch = arXivIdRegex.exec(reportNumber)
-      if (arXivMatch) {
-        identifiers.push({ type: 'arxiv', id: arXivMatch[1], source: 'reportNumber' })
-      }
-    }
-
-    // Check for arXiv ID in Extra field
-    const extra = item.getField('extra')
-    if (extra) {
-      const arXivMatch = arXivIdRegex.exec(extra)
-      if (arXivMatch) {
-        identifiers.push({ type: 'arxiv', id: arXivMatch[1], source: 'extra' })
-      }
-    }
-
-    // Check URL field for arXiv URLs
-    const url = item.getField('url')
-    if (url) {
-      const urlArXivMatch = arXivUrlRegex.exec(url)
-      if (urlArXivMatch) {
-        identifiers.push({ type: 'arxiv', id: urlArXivMatch[1], source: 'url' })
-      }
-    }
-
-    // Check callNumber field (sometimes used for archive identifiers)
-    const callNumber = item.getField('callNumber')
-    if (callNumber) {
-      const arXivMatch = arXivIdRegex.exec(callNumber)
-      if (arXivMatch) {
-        identifiers.push({ type: 'arxiv', id: arXivMatch[1], source: 'callNumber' })
-      }
-    }
-
-    return identifiers
+    return extractIdentifiers({
+      doi: item.getField('DOI'),
+      archiveID: item.getField('archiveID'),
+      reportNumber: item.getField('reportNumber'),
+      extra: item.getField('extra'),
+      url: item.getField('url'),
+      callNumber: item.getField('callNumber'),
+    })
   }
 
   /**
@@ -607,9 +399,16 @@ class Helpers {
 
   static getDatabasePrefArray(): string[] {
     const databaseOrder = getPref('databaseOrder') || 'crossref'
-    const databaseArray = databaseOrder.split(',').map((db: string) => db.trim())
+    const databaseArray = [
+      ...new Set(
+        databaseOrder
+          .split(',')
+          .map((db: string) => db.trim())
+          .filter((db) => (DATABASE_IDS as readonly string[]).includes(db)),
+      ),
+    ]
     if (databaseArray.length === 0) {
-      ztoolkit.log('Citation debug - No databases configured in preferences')
+      ztoolkit.log('Citation debug - No valid databases configured in preferences')
     }
     return databaseArray
   }
@@ -633,6 +432,38 @@ interface CountInfo {
 }
 type CountArray = CountInfo[]
 
+// All Extra reads/modifies/writes go through this chain. The previous code read
+// Extra at the start of a lookup and wrote it after an `await`, so manual,
+// automatic, and fetch-on-add runs could overwrite each other's new lines.
+let extraWriteChain: Promise<unknown> = Promise.resolve()
+
+function withExtraWriteLock<T>(task: () => Promise<T>): Promise<T> {
+  const run = extraWriteChain.then(task, task)
+  // Keep the chain alive even when a task fails; the caller still gets the error.
+  extraWriteChain = run.catch(() => undefined)
+  return run
+}
+
+// Column data providers run for every visible item on every repaint. Cache the
+// parsed Extra text by item id and invalidate when the field changes.
+const PARSED_EXTRA_CACHE_LIMIT = 1000
+const parsedExtraCache = new Map<number, { extra: string; parsed: ParsedExtra }>()
+
+function getParsedExtra(item: Zotero.Item): ParsedExtra {
+  const extra = item.getField('extra') || ''
+  const cached = parsedExtraCache.get(item.id)
+  if (cached && cached.extra === extra) return cached.parsed
+
+  const parsed = parseExtra(extra)
+  parsedExtraCache.delete(item.id)
+  parsedExtraCache.set(item.id, { extra, parsed })
+  if (parsedExtraCache.size > PARSED_EXTRA_CACHE_LIMIT) {
+    const oldest = parsedExtraCache.keys().next().value
+    if (oldest !== undefined) parsedExtraCache.delete(oldest)
+  }
+  return parsed
+}
+
 class Core {
   /**
    * Store citation count in the Extra field
@@ -644,63 +475,56 @@ class Core {
    * @returns true if the item was modified and saved, false otherwise
    */
   static async setCitationCount(item: Zotero.Item, data: CountArray, onStep?: StepReporter): Promise<boolean> {
-    let extra = item.getField('extra')
-    if (!extra) {
-      extra = ''
-    }
+    return withExtraWriteLock(async () => {
+      if (!addon.data.alive) return false
 
-    ztoolkit.log('Citation debug - Setting citation count for item:', item.id, 'count:', data)
-    ztoolkit.log('Citation debug - Original Extra field:', extra)
-
-    const extras = extra.split('\n')
-
-    // Format date
-    const today = new Date()
-    const dd = String(today.getDate()).padStart(2, '0')
-    const mm = String(today.getMonth() + 1).padStart(2, '0') // January is 0!
-    const yyyy = today.getFullYear()
-    const date = `${yyyy}-${mm}-${dd}`
-
-    let modified = false
-
-    // Append-only: never remove existing lines, only skip exact duplicates
-    for (const { title, count, fwci } of data) {
-      const newEntry = `Citations: ${count} (${title}) [${date}]` ///REGEXP
-
-      if (!extras.includes(newEntry)) {
-        // Insert at the top of the Extra field
-        extras.unshift(newEntry)
-        modified = true
-        ztoolkit.log('Citation debug - Prepended entry:', newEntry)
-      } else {
-        ztoolkit.log('Citation debug - Skipping exact duplicate:', newEntry)
+      // Re-read under the lock. Another run may have written since the caller
+      // fetched this item.
+      try {
+        await item.reload(['extra'], true)
+      } catch (e) {
+        ztoolkit.log('Citation debug - Could not reload Extra before writing:', e)
       }
 
-      // Store FWCI if available (OpenAlex-specific)
-      if (fwci !== undefined && fwci !== null && !isNaN(fwci)) {
-        const fwciEntry = `FWCI: ${Number(fwci).toFixed(2)} (${title}) [${date}]` ///REGEXP
-        if (!extras.includes(fwciEntry)) {
-          // Insert at the top of the Extra field
-          extras.unshift(fwciEntry)
+      const extra = item.getField('extra') || ''
+      ztoolkit.log('Citation debug - Setting citation count for item:', item.id, 'count:', data)
+
+      const extras = extra.split('\n')
+      const date = formatDate()
+      let modified = false
+
+      // Append-only: never remove user lines. Plugin-owned history is capped
+      // below so a long-lived item does not accumulate thousands of entries.
+      for (const { title, count, fwci } of data) {
+        const newEntry = `Citations: ${count} (${title}) [${date}]`
+
+        if (!extras.includes(newEntry)) {
+          extras.unshift(newEntry)
           modified = true
-          ztoolkit.log('Citation debug - Prepended FWCI entry:', fwciEntry)
-        } else {
-          ztoolkit.log('Citation debug - Skipping exact duplicate FWCI:', fwciEntry)
+        }
+
+        // Store FWCI if available (OpenAlex-specific)
+        if (fwci !== undefined && fwci !== null && Number.isFinite(fwci)) {
+          const fwciEntry = `FWCI: ${Number(fwci).toFixed(2)} (${title}) [${date}]`
+          if (!extras.includes(fwciEntry)) {
+            extras.unshift(fwciEntry)
+            modified = true
+          }
         }
       }
-    }
 
-    if (modified) {
-      const newExtra = extras.join('\n')
-      onStep?.(getString('progress-step-saving'))
-      // Give the window a chance to paint the save label before the write.
-      await yieldToUI()
-      item.setField('extra', newExtra)
-      // skipSelect: batch updates must not keep moving the library selection
-      await item.saveTx({ skipSelect: true })
-      ztoolkit.log('Citation debug - Updated Extra field')
-    }
-    return modified
+      if (modified) {
+        const newExtra = trimExtraHistory(extras.join('\n'))
+        onStep?.(getString('progress-step-saving'))
+        // Give the window a chance to paint the save label before the write.
+        await yieldToUI()
+        item.setField('extra', newExtra)
+        // skipSelect: batch updates must not keep moving the library selection
+        await item.saveTx({ skipSelect: true })
+        ztoolkit.log('Citation debug - Updated Extra field')
+      }
+      return modified
+    })
   }
 
   /**
@@ -709,86 +533,18 @@ class Core {
    * @returns Object with counts and databases for rendering
    */
   static getCitationCountForColumn(item: Zotero.Item): { counts: string[]; databases: string[] } | null {
-    // Get user's preferred database order
     const databaseOrder = getPref('databaseOrder') || 'crossref'
     const operationsIncluded = databaseOrder.split(',').map((db: string) => db.trim())
+    const parsed = getParsedExtra(item)
 
-    const extra = item.getField('extra')
-    if (!extra) {
-      return null
-    }
-
-    const extras = extra.split('\n')
-
-    // For each source, find the entry with the most recent date
-    const latestCounts: Record<string, { count: number; date: string }> = {}
-
-    for (const tag of operationsIncluded) {
-      const tagName = getOperationName(tag)
-      const escapedTag = escapeRegex(tagName)
-
-      // Pattern 1: Current format "Citations: N (SourceName) [YYYY-MM-DD]"
-      const pattNew = new RegExp(`^Citations: *(\\d+) *\\(${escapedTag}\\) *\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\]`, 'i')
-      // Pattern 2: Current format without date "Citations: N (SourceName)"
-      const pattNewNoDate = new RegExp(`^Citations: *(\\d+) *\\(${escapedTag}\\)`, 'i')
-      // Pattern 3: Old format "N citations (SourceName/IDType) [YYYY-MM-DD]"
-      const pattOld = new RegExp(
-        `^(\\d+) citations \\(${escapedTag}(?:\\/\\w+)?\\) *(?:\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\])?`,
-        'i',
-      )
-      // Pattern 4: Very old format "Citations (SourceName): N"
-      const pattVeryOld = new RegExp(`^Citations \\(${escapedTag}\\): *(\\d+)`, 'i')
-
-      for (const line of extras) {
-        let count: number | null = null
-        let dateStr: string | null = null
-
-        let match = pattNew.exec(line)
-        if (match) {
-          count = parseInt(match[1])
-          dateStr = match[2] || null
-        }
-        if (count === null) {
-          match = pattNewNoDate.exec(line)
-          if (match) {
-            count = parseInt(match[1])
-            dateStr = null
-          }
-        }
-        if (count === null) {
-          match = pattOld.exec(line)
-          if (match) {
-            count = parseInt(match[1])
-            dateStr = match[2] || null
-          }
-        }
-        if (count === null) {
-          match = pattVeryOld.exec(line)
-          if (match) {
-            count = parseInt(match[1])
-            dateStr = null
-          }
-        }
-
-        if (count !== null) {
-          if (!latestCounts[tag] || (dateStr && (!latestCounts[tag].date || dateStr > latestCounts[tag].date))) {
-            latestCounts[tag] = { count, date: dateStr || '' }
-          }
-        }
-      }
-    }
-
-    // Format output
     const counts: string[] = []
     const databases: string[] = []
-
     for (const tag of operationsIncluded) {
-      const entry = latestCounts[tag]
-      counts.push(entry ? entry.count.toString() : '-')
+      const entry = parsed.citations[tag as DatabaseId]
+      counts.push(entry ? String(entry.value) : '-')
       databases.push(tag)
     }
 
-    // Only return if at least one count was found
     const hasAnyCount = counts.some((count) => count !== '-')
     return hasAnyCount ? { counts, databases } : null
   }
@@ -799,65 +555,10 @@ class Core {
    * @returns FWCI string or '-' if not found
    */
   static getFWCIForColumn(item: Zotero.Item): string {
-    // Scan ALL known sources, not just configured ones — FWCI data may exist
-    // from previous plugins (e.g. zotero-cc) regardless of current settings
-    const allSources = ['crossref', 'inspire', 'semanticscholar', 'openalex']
-
-    const extra = item.getField('extra')
-    if (!extra) return '-'
-
-    const extras = extra.split('\n')
-    let bestFwci: number | null = null
-    let bestDate: string | null = null
-
-    for (const tag of allSources) {
-      const tagName = getOperationName(tag)
-      const escapedTag = escapeRegex(tagName)
-
-      // Current format: "FWCI: N.NN (SourceName) [YYYY-MM-DD]"
-      const pattNew = new RegExp(`^FWCI: *(\\d+\\.?\\d*) *\\(${escapedTag}\\) *\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\]`, 'i')
-      // Without date: "FWCI: N.NN (SourceName)"
-      const pattNoDate = new RegExp(`^FWCI: *(\\d+\\.?\\d*) *\\(${escapedTag}\\)`, 'i')
-      // Old zotero-cc format: "FWCI: N.NN (SourceName/IDType) [YYYY-MM-DD]"
-      const pattOld = new RegExp(
-        `^FWCI: *(\\d+\\.?\\d*) *\\(${escapedTag}(?:\\/\\w+)?\\) *(?:\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\])?`,
-        'i',
-      )
-
-      for (const line of extras) {
-        let match = pattNew.exec(line)
-        let fwciVal: number | null = null
-        let dateStr: string | null = null
-
-        if (match) {
-          fwciVal = parseFloat(match[1])
-          dateStr = match[2] || null
-        }
-        if (fwciVal === null) {
-          match = pattNoDate.exec(line)
-          if (match) {
-            fwciVal = parseFloat(match[1])
-            dateStr = null
-          }
-        }
-        if (fwciVal === null) {
-          match = pattOld.exec(line)
-          if (match) {
-            fwciVal = parseFloat(match[1])
-            dateStr = match[2] || null
-          }
-        }
-
-        if (fwciVal !== null && !isNaN(fwciVal)) {
-          if (bestFwci === null || (dateStr && (!bestDate || dateStr > bestDate))) {
-            bestFwci = fwciVal
-            bestDate = dateStr || null
-          }
-        }
-      }
-    }
-
-    return bestFwci !== null ? bestFwci.toFixed(2) : '-'
+    // Scan all known sources, not just configured ones: FWCI data may exist
+    // from previous plugins (e.g. zotero-cc) regardless of current settings.
+    const best = pickLatestEntry(getParsedExtra(item).fwci)
+    return best ? best.value.toFixed(2) : '-'
   }
 
   /**
@@ -871,7 +572,7 @@ class Core {
     if (!dateStr) return null
 
     // Try YYYY-MM-DD, YYYY/MM/DD, YYYY.MM.DD
-    const fullDateMatch = dateStr.match(/\b(1[0-9]{3}|20[0-9]{2}|2100)[-\/.](\d{1,2})[-\/.](\d{1,2})\b/)
+    const fullDateMatch = dateStr.match(/\b(1[0-9]{3}|20[0-9]{2}|2100)[-/.](\d{1,2})[-/.](\d{1,2})\b/)
     if (fullDateMatch) {
       const year = parseInt(fullDateMatch[1], 10)
       const month = parseInt(fullDateMatch[2], 10)
@@ -882,7 +583,7 @@ class Core {
     }
 
     // Try YYYY-MM or YYYY/MM
-    const yearMonthMatch = dateStr.match(/\b(1[0-9]{3}|20[0-9]{2}|2100)[-\/.](\d{1,2})\b/)
+    const yearMonthMatch = dateStr.match(/\b(1[0-9]{3}|20[0-9]{2}|2100)[-/.](\d{1,2})\b/)
     if (yearMonthMatch) {
       const year = parseInt(yearMonthMatch[1], 10)
       const month = parseInt(yearMonthMatch[2], 10)
@@ -916,69 +617,9 @@ class Core {
    * @returns The latest citation count and its source name, or null if none found
    */
   static findLatestCitationFromExtra(extra: string): { count: number; sourceName: string; date: string | null } | null {
-    const allSources = ['crossref', 'inspire', 'semanticscholar', 'openalex']
-    const extras = extra.split('\n')
-    let bestCount: number | null = null
-    let bestSourceName: string | null = null
-    let bestDate: string | null = null
-
-    for (const tag of allSources) {
-      const tagName = getOperationName(tag)
-      const escapedTag = escapeRegex(tagName)
-
-      // Same four patterns as getCitationCountForColumn
-      const pattNew = new RegExp(`^Citations: *(\\d+) *\\(${escapedTag}\\) *\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\]`, 'i')
-      const pattNewNoDate = new RegExp(`^Citations: *(\\d+) *\\(${escapedTag}\\)`, 'i')
-      const pattOld = new RegExp(
-        `^(\\d+) citations \\(${escapedTag}(?:\\/\\w+)?\\) *(?:\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\])?`,
-        'i',
-      )
-      const pattVeryOld = new RegExp(`^Citations \\(${escapedTag}\\): *(\\d+)`, 'i')
-
-      for (const line of extras) {
-        let count: number | null = null
-        let dateStr: string | null = null
-
-        let match = pattNew.exec(line)
-        if (match) {
-          count = parseInt(match[1])
-          dateStr = match[2] || null
-        }
-        if (count === null) {
-          match = pattNewNoDate.exec(line)
-          if (match) {
-            count = parseInt(match[1])
-            dateStr = null
-          }
-        }
-        if (count === null) {
-          match = pattOld.exec(line)
-          if (match) {
-            count = parseInt(match[1])
-            dateStr = match[2] || null
-          }
-        }
-        if (count === null) {
-          match = pattVeryOld.exec(line)
-          if (match) {
-            count = parseInt(match[1])
-            dateStr = null
-          }
-        }
-
-        if (count !== null) {
-          if (bestCount === null || (dateStr && (!bestDate || dateStr > bestDate))) {
-            bestCount = count
-            bestDate = dateStr || null
-            bestSourceName = tagName
-          }
-        }
-      }
-    }
-
-    return bestCount !== null && bestSourceName !== null
-      ? { count: bestCount, sourceName: bestSourceName, date: bestDate }
-      : null
+    const best = pickLatestEntry(parseExtra(extra).citations)
+    if (!best) return null
+    return { count: best.value, sourceName: best.database, date: best.date }
   }
 
   /**
@@ -1013,9 +654,8 @@ class Core {
       endDate = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]))
       dateStr = citationInfo.date
     } else {
-      const today = new Date()
-      endDate = today
-      dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
+      endDate = new Date()
+      dateStr = formatDate(endDate)
     }
 
     // Compute fractional years since publication for higher precision.
@@ -1039,7 +679,8 @@ class Core {
     yearsSincePub = Math.max(0.08, yearsSincePub)
     const avgCite = citationInfo.count / yearsSincePub
 
-    const newEntry = `AvgCite: ${avgCite.toFixed(2)} (${citationInfo.sourceName}) [${dateStr}]` ///REGEXP
+    const storageName = DATABASE_STORAGE_NAMES[citationInfo.sourceName as DatabaseId] || citationInfo.sourceName
+    const newEntry = `AvgCite: ${avgCite.toFixed(2)} (${storageName}) [${dateStr}]`
 
     const extras = extra.split('\n')
     if (extras.includes(newEntry)) {
@@ -1058,12 +699,19 @@ class Core {
    * @param newEntry entry produced by computeAvgCiteEntry
    */
   static async storeAvgCiteEntry(item: Zotero.Item, newEntry: string): Promise<void> {
+    // The batch path computes entries before it writes. Re-read here so a
+    // citation update that landed in between is not overwritten.
+    try {
+      await item.reload(['extra'], true)
+    } catch (e) {
+      ztoolkit.log('AvgCite debug - Could not reload Extra before writing:', e)
+    }
     const extra = item.getField('extra') || ''
     const extras = extra.split('\n')
     if (extras.includes(newEntry)) return
 
     extras.unshift(newEntry)
-    item.setField('extra', extras.join('\n'))
+    item.setField('extra', trimExtraHistory(extras.join('\n')))
     // skipSelect: batch updates must not keep moving the library selection.
     // save() when already inside a transaction, so we don't nest a second one.
     if (Zotero.DB.inTransaction()) {
@@ -1083,13 +731,21 @@ class Core {
    * @returns true if a new entry was stored, false otherwise
    */
   static async computeAndSetAvgCiteForItem(item: Zotero.Item, onStep?: StepReporter): Promise<boolean> {
-    onStep?.(getString('progress-step-avgcite-reading'))
-    const newEntry = Core.computeAvgCiteEntry(item)
-    if (newEntry === null) return false
+    return withExtraWriteLock(async () => {
+      if (!addon.data.alive) return false
+      onStep?.(getString('progress-step-avgcite-reading'))
+      try {
+        await item.reload(['extra'], true)
+      } catch (e) {
+        ztoolkit.log('AvgCite debug - Could not reload Extra before writing:', e)
+      }
+      const newEntry = Core.computeAvgCiteEntry(item)
+      if (newEntry === null) return false
 
-    onStep?.(getString('progress-step-saving'))
-    await Core.storeAvgCiteEntry(item, newEntry)
-    return true
+      onStep?.(getString('progress-step-saving'))
+      await Core.storeAvgCiteEntry(item, newEntry)
+      return true
+    })
   }
 
   /**
@@ -1098,54 +754,20 @@ class Core {
    * @returns AvgCite value string or '-' if not found
    */
   static getAvgCiteForColumn(item: Zotero.Item): string {
-    const allSources = ['crossref', 'inspire', 'semanticscholar', 'openalex']
-    const extra = item.getField('extra')
-    if (!extra) return '-'
-
-    const extras = extra.split('\n')
-    let bestValue: number | null = null
-    let bestDate: string | null = null
-
-    for (const tag of allSources) {
-      const tagName = getOperationName(tag)
-      const escapedTag = escapeRegex(tagName)
-
-      // "AvgCite: N.NN (SourceName) [YYYY-MM-DD]"
-      const pattNew = new RegExp(
-        `^AvgCite: *(\\d+\\.?\\d*) *\\(${escapedTag}\\) *\\[(\\d{4}-\\d{1,2}-\\d{1,2})\\]`,
-        'i',
-      )
-      // "AvgCite: N.NN (SourceName)" without date
-      const pattNoDate = new RegExp(`^AvgCite: *(\\d+\\.?\\d*) *\\(${escapedTag}\\)`, 'i')
-
-      for (const line of extras) {
-        let match = pattNew.exec(line)
-        let value: number | null = null
-        let dateStr: string | null = null
-
-        if (match) {
-          value = parseFloat(match[1])
-          dateStr = match[2] || null
-        }
-        if (value === null) {
-          match = pattNoDate.exec(line)
-          if (match) {
-            value = parseFloat(match[1])
-            dateStr = null
-          }
-        }
-
-        if (value !== null && !isNaN(value)) {
-          if (bestValue === null || (dateStr && (!bestDate || dateStr > bestDate))) {
-            bestValue = value
-            bestDate = dateStr || null
-          }
-        }
-      }
-    }
-
-    return bestValue !== null ? bestValue.toFixed(2) : '-'
+    const best = pickLatestEntry(getParsedExtra(item).avgCite)
+    return best ? best.value.toFixed(2) : '-'
   }
+}
+
+function parseCount(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value >= 0 ? value : null
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null
+  }
+  return null
 }
 
 class DBInterface {
@@ -1166,84 +788,49 @@ class DBInterface {
    */
   static async getCrossrefCountEnhanced(item: Zotero.Item, reporter?: StepReporter): Promise<LookupResult> {
     const identifier = Helpers.getItemIdentifier(item)
-    if (identifier?.type !== 'doi') {
+    const doi = identifier?.type === 'doi' ? normalizeDoi(identifier.id) : null
+    if (!doi) {
       ztoolkit.log('Citation debug - No DOI found for item:', item.id)
       return { count: -1, status: 'no_identifier', message: 'No DOI found' }
     }
-    const edoi = encodeURIComponent(identifier.id)
-    ztoolkit.log('Citation debug - Encoded DOI:', edoi)
 
-    // Apply adaptive rate limiting
     await RateLimitManager.waitForRateLimit('crossref', reporter)
     reporter?.(queryStepText('crossref'))
 
-    let response: any = null
-
     try {
-      const style = 'vnd.citationstyles.csl+json'
-      const xform = `transform/application/${style}`
-      const url = `https://api.crossref.org/works/${edoi}/${xform}`
-      ztoolkit.log('Citation debug - Fetching from Crossref API:', url)
+      // The search route with an explicit `select` is ~250 bytes instead of the
+      // ~200 KB CSL transform, and still returns the citation count.
+      const url = `https://api.crossref.org/works?filter=doi:${encodeURIComponent(
+        doi,
+      )}&rows=1&select=DOI,is-referenced-by-count`
+      const response = await fetchWithTimeout(url, {
+        headers: { Accept: 'application/json' },
+      })
 
-      response = await fetch(url)
-        .then((response) => {
-          ztoolkit.log('Citation debug - Crossref API response status:', response.status)
-          return response.json()
-        })
-        .catch((error) => {
-          ztoolkit.log('Citation debug - Crossref API fetch error:', error)
-          return null
-        })
-
-      if (response === null) {
-        ztoolkit.log('Citation debug - Crossref API failed, trying DOI.org')
-        const url = `https://doi.org/${edoi}`
-        const doiResponse = await fetch(url, {
-          headers: {
-            Accept: `application/${style}`,
-          },
-        })
-
-        if (doiResponse.status === 404) {
-          return { count: 0, status: 'not_found', message: 'DOI not found in Crossref' }
-        }
-
-        if (doiResponse.status === 429) {
-          RateLimitManager.handleRateLimit('crossref')
-          return { count: -1, status: 'rate_limited', message: 'API rate limit exceeded' }
-        }
-
-        response = await doiResponse.json().catch((error) => {
-          ztoolkit.log('Citation debug - DOI.org fetch error:', error)
-          return null
-        })
+      if (response.status === 404) {
+        return { count: 0, status: 'not_found', message: 'DOI not found in Crossref' }
+      }
+      if (response.status === 429) {
+        RateLimitManager.handleRateLimit('crossref')
+        return { count: -1, status: 'rate_limited', message: 'API rate limit exceeded' }
+      }
+      if (!response.ok) {
+        return { count: -1, status: 'api_error', message: `Crossref HTTP ${response.status}` }
       }
 
-      if (response === null) {
-        // Something went wrong
-        ztoolkit.log('Citation debug - Both API requests failed')
-        return { count: -1, status: 'api_error', message: 'API requests failed' }
+      const body = await readJson(response)
+      const items = body?.message?.items
+      if (!Array.isArray(items) || items.length === 0) {
+        return { count: 0, status: 'not_found', message: 'DOI not found in Crossref' }
       }
 
-      ztoolkit.log('Citation debug - API response:', JSON.stringify(response).substring(0, 500) + '...')
+      const count = parseCount(items[0]?.['is-referenced-by-count'])
+      if (count === null) {
+        return { count: -1, status: 'api_error', message: 'Invalid citation count in Crossref response' }
+      }
 
-      const count: unknown = response['is-referenced-by-count']
-      if (count === undefined) {
-        ztoolkit.log('Citation debug - No is-referenced-by-count field in response')
-        return { count: 0, status: 'not_found', message: 'No citation count field in response' }
-      }
-      if (typeof count === 'number') {
-        ztoolkit.log('Citation debug - is-referenced-by-count is not a number:', count)
-        RateLimitManager.handleSuccess('crossref')
-        return { count, status: 'success' }
-      }
-      if (typeof count === 'string') {
-        ztoolkit.log('Citation debug - is-referenced-by-count is a string:', count)
-        ztoolkit.log('Citation debug - Citation count from API:', count)
-        RateLimitManager.handleSuccess('crossref')
-        return { count: parseInt(count), status: 'success' }
-      }
-      return { count: -1, status: 'api_error', message: 'Invalid response format' }
+      RateLimitManager.handleSuccess('crossref')
+      return { count, status: 'success' }
     } catch (err) {
       ztoolkit.log('Error getting citation count from Crossref', err)
       return { count: -1, status: 'api_error', message: (err as Error).message }
@@ -1272,84 +859,76 @@ class DBInterface {
       return { count: -1, status: 'no_identifier', message: 'No DOI or arXiv ID found' }
     }
 
-    // Try each identifier until one succeeds
-    for (const identifier of identifiers) {
-      ztoolkit.log(
-        `Citation debug - Trying INSPIRE with ${identifier.type} ID: ${identifier.id} from ${identifier.source}`,
-      )
+    let sawNotFound = false
+    let sawApiError = false
+    let sawIdentifier = false
 
-      // Apply adaptive rate limiting
+    // Try each identifier until one succeeds. A 404 only means "not found"
+    // when no request failed for a transient reason.
+    for (const identifier of identifiers) {
+      let path: string
+      if (identifier.type === 'doi') {
+        const doi = normalizeDoi(identifier.id)
+        if (!doi) {
+          sawApiError = true
+          continue
+        }
+        path = `doi/${encodeURIComponent(doi)}`
+      } else {
+        path = `arxiv/${encodeURIComponent(identifier.id)}`
+      }
+      sawIdentifier = true
+
       await RateLimitManager.waitForRateLimit('inspire', reporter)
       reporter?.(queryStepText('inspire'))
 
-      let response: any = null
-
       try {
-        const type = identifier.type === 'doi' ? 'dois' : 'arxiv'
-        const url = `https://inspirehep.net/api/${type}/${identifier.id}`
-        ztoolkit.log('Citation debug - Fetching from INSPIRE API:', url)
-
-        const fetchResponse = await fetch(url)
+        const url = `https://inspirehep.net/api/${path}`
+        const fetchResponse = await fetchWithTimeout(url)
 
         if (fetchResponse.status === 404) {
-          ztoolkit.log(
-            `Citation debug - ${identifier.type} ID ${identifier.id} not found in INSPIRE, trying next identifier`,
-          )
+          sawNotFound = true
           continue
         }
-
         if (fetchResponse.status === 429) {
           RateLimitManager.handleRateLimit('inspire')
           return { count: -1, status: 'rate_limited', message: 'API rate limit exceeded' }
         }
+        if (!fetchResponse.ok) {
+          sawApiError = true
+          continue
+        }
 
-        response = await fetchResponse.json().catch((error) => {
-          ztoolkit.log('Citation debug - INSPIRE API fetch error:', error)
-          return null
-        })
-
+        const response = await readJson(fetchResponse)
         if (response === null) {
-          ztoolkit.log(
-            `Citation debug - INSPIRE API request failed for ${identifier.type} ID ${identifier.id}, trying next identifier`,
-          )
+          sawApiError = true
           continue
         }
 
-        ztoolkit.log('Citation debug - INSPIRE API response:', JSON.stringify(response).substring(0, 500) + '...')
-
-        const count = response?.metadata?.citation_count
-        if (count === undefined) {
-          ztoolkit.log(
-            `Citation debug - No citation_count field in INSPIRE response for ${identifier.type} ID ${identifier.id}, trying next identifier`,
-          )
+        const count = parseCount(response?.metadata?.citation_count)
+        if (count === null) {
+          sawApiError = true
           continue
         }
-        if (typeof count === 'number') {
-          ztoolkit.log(
-            `Citation debug - INSPIRE citation count: ${count} (found using ${identifier.type} ID ${identifier.id} from ${identifier.source})`,
-          )
-          RateLimitManager.handleSuccess('inspire')
-          return { count, status: 'success' }
-        }
-        if (typeof count === 'string') {
-          ztoolkit.log(
-            `Citation debug - INSPIRE citation count (string): ${count} (found using ${identifier.type} ID ${identifier.id} from ${identifier.source})`,
-          )
-          RateLimitManager.handleSuccess('inspire')
-          return { count: parseInt(count), status: 'success' }
-        }
-        ztoolkit.log(
-          `Citation debug - Invalid response format for ${identifier.type} ID ${identifier.id}, trying next identifier`,
-        )
-        continue
+
+        RateLimitManager.handleSuccess('inspire')
+        return { count, status: 'success' }
       } catch (err) {
         ztoolkit.log(`Error getting citation count from INSPIRE for ${identifier.type} ID ${identifier.id}:`, err)
-        continue
+        sawApiError = true
       }
     }
 
-    // All identifiers failed
-    return { count: 0, status: 'not_found', message: 'No valid identifiers found in INSPIRE' }
+    if (!sawIdentifier) {
+      return { count: -1, status: 'no_identifier', message: 'No valid DOI or arXiv ID found' }
+    }
+    if (sawApiError) {
+      return { count: -1, status: 'api_error', message: 'INSPIRE request failed' }
+    }
+    if (sawNotFound) {
+      return { count: 0, status: 'not_found', message: 'No valid identifiers found in INSPIRE' }
+    }
+    return { count: -1, status: 'api_error', message: 'Unexpected INSPIRE result' }
   }
 
   /**
@@ -1374,108 +953,91 @@ class DBInterface {
       return { count: -1, status: 'no_identifier', message: 'No DOI or arXiv ID found' }
     }
 
-    // Try each identifier until one succeeds
-    for (const identifier of identifiers) {
-      ztoolkit.log(
-        `Citation debug - Trying Semantic Scholar with ${identifier.type} ID: ${identifier.id} from ${identifier.source}`,
-      )
+    let sawNotFound = false
+    let sawApiError = false
+    let sawIdentifier = false
 
-      // Apply adaptive rate limiting
+    for (const identifier of identifiers) {
+      let apiPath: string
+
+      if (identifier.type === 'arxiv') {
+        apiPath = `arXiv:${encodeURIComponent(identifier.id)}`
+      } else {
+        const doi = normalizeDoi(identifier.id)
+        if (!doi) {
+          sawApiError = true
+          continue
+        }
+        const arxivFromDoi = /^10\.48550\/arxiv\.(.+)$/i.exec(doi)
+        if (arxivFromDoi) {
+          // Semantic Scholar does not resolve arXiv DOIs, but it does resolve
+          // the equivalent `arXiv:<id>` form.
+          const arxivId = normalizeArxivId(arxivFromDoi[1])
+          if (!arxivId) {
+            sawApiError = true
+            continue
+          }
+          apiPath = `arXiv:${encodeURIComponent(arxivId)}`
+        } else {
+          // Keep the DOI slash readable; encode everything else.
+          apiPath = encodeURIComponent(doi).replace(/%2F/gi, '/')
+        }
+      }
+      sawIdentifier = true
+
       await RateLimitManager.waitForRateLimit('semanticscholar', reporter)
       reporter?.(queryStepText('semanticscholar'))
 
-      let response: any = null
-
       try {
-        // For arXiv DOIs, extract the arXiv ID since Semantic Scholar doesn't recognize arXiv DOIs
-        let prefix = ''
-        let apiId = identifier.id
-
-        if (identifier.type === 'doi' && identifier.id.includes('arXiv')) {
-          // Extract arXiv ID from DOI like "10.48550/arXiv.2201.02177"
-          const arxivMatch = /arXiv\.(\d+\.\d+)/i.exec(identifier.id)
-          if (arxivMatch) {
-            prefix = 'arXiv:'
-            apiId = arxivMatch[1]
-            ztoolkit.log(`Citation debug - Using arXiv ID ${apiId} instead of arXiv DOI for Semantic Scholar`)
-          }
-        } else if (identifier.type === 'arxiv') {
-          prefix = 'arXiv:'
-          apiId = identifier.id
-        }
-        // For regular DOIs, use no prefix
-
-        const url = `https://api.semanticscholar.org/graph/v1/paper/${prefix}${apiId}?fields=citationCount`
-        ztoolkit.log('Citation debug - Fetching from Semantic Scholar API:', url)
-
-        const fetchResponse = await fetch(url)
+        const url = `https://api.semanticscholar.org/graph/v1/paper/${apiPath}?fields=citationCount`
+        const fetchResponse = await fetchWithTimeout(url)
 
         if (fetchResponse.status === 404) {
-          ztoolkit.log(
-            `Citation debug - ${identifier.type} ID ${identifier.id} not found in Semantic Scholar, trying next identifier`,
-          )
+          sawNotFound = true
           continue
         }
-
         if (fetchResponse.status === 429) {
           RateLimitManager.handleRateLimit('semanticscholar')
           return { count: -1, status: 'rate_limited', message: 'API rate limit exceeded' }
         }
+        if (!fetchResponse.ok) {
+          sawApiError = true
+          continue
+        }
 
-        response = await fetchResponse.json().catch((error) => {
-          ztoolkit.log('Citation debug - Semantic Scholar API fetch error:', error)
-          return null
-        })
-
+        const response = await readJson(fetchResponse)
         if (response === null) {
-          ztoolkit.log(
-            `Citation debug - Semantic Scholar API request failed for ${identifier.type} ID ${identifier.id}, trying next identifier`,
-          )
+          sawApiError = true
           continue
         }
 
-        ztoolkit.log(
-          'Citation debug - Semantic Scholar API response:',
-          JSON.stringify(response).substring(0, 500) + '...',
-        )
-
-        const count = response?.citationCount
-        if (count === undefined) {
-          ztoolkit.log(
-            `Citation debug - No citationCount field in Semantic Scholar response for ${identifier.type} ID ${identifier.id}, trying next identifier`,
-          )
+        const count = parseCount(response?.citationCount)
+        if (count === null) {
+          sawApiError = true
           continue
         }
 
-        if (typeof count === 'number') {
-          ztoolkit.log(
-            `Citation debug - Semantic Scholar citation count: ${count} (found using ${identifier.type} ID ${identifier.id} from ${identifier.source})`,
-          )
-          RateLimitManager.handleSuccess('semanticscholar')
-          return { count, status: 'success' }
-        }
-        if (typeof count === 'string') {
-          ztoolkit.log(
-            `Citation debug - Semantic Scholar citation count (string): ${count} (found using ${identifier.type} ID ${identifier.id} from ${identifier.source})`,
-          )
-          RateLimitManager.handleSuccess('semanticscholar')
-          return { count: parseInt(count), status: 'success' }
-        }
-        ztoolkit.log(
-          `Citation debug - Invalid response format for ${identifier.type} ID ${identifier.id}, trying next identifier`,
-        )
-        continue
+        RateLimitManager.handleSuccess('semanticscholar')
+        return { count, status: 'success' }
       } catch (err) {
         ztoolkit.log(
           `Error getting citation count from Semantic Scholar for ${identifier.type} ID ${identifier.id}:`,
           err,
         )
-        continue
+        sawApiError = true
       }
     }
 
-    // All identifiers failed
-    return { count: 0, status: 'not_found', message: 'No valid identifiers found in Semantic Scholar' }
+    if (!sawIdentifier) {
+      return { count: -1, status: 'no_identifier', message: 'No valid DOI or arXiv ID found' }
+    }
+    if (sawApiError) {
+      return { count: -1, status: 'api_error', message: 'Semantic Scholar request failed' }
+    }
+    if (sawNotFound) {
+      return { count: 0, status: 'not_found', message: 'No valid identifiers found in Semantic Scholar' }
+    }
+    return { count: -1, status: 'api_error', message: 'Unexpected Semantic Scholar result' }
   }
 
   /**
@@ -1495,68 +1057,49 @@ class DBInterface {
    */
   static async getOpenAlexCountEnhanced(item: Zotero.Item, reporter?: StepReporter): Promise<LookupResult> {
     const identifier = Helpers.getItemIdentifier(item)
-    if (identifier?.type !== 'doi') {
+    const doi = identifier?.type === 'doi' ? normalizeDoi(identifier.id) : null
+    if (!doi) {
       ztoolkit.log('Citation debug - No DOI found for OpenAlex lookup:', item.id)
       return { count: -1, status: 'no_identifier', message: 'No DOI found (OpenAlex requires DOI)' }
     }
 
-    // DOI normalization: strip common prefixes, then URL-decode
-    const decodedDoi = decodeURIComponent(identifier.id)
-    const normalizedDoi = decodedDoi
-      .replace(/^https?:\/\/(dx\.)?doi\.org\//i, '')
-      .replace(/^doi:/i, '')
-      .trim()
-
-    if (!normalizedDoi) {
-      ztoolkit.log('Citation debug - DOI normalization produced empty string for item:', item.id)
-      return { count: -1, status: 'no_identifier', message: 'DOI normalization failed' }
-    }
-
-    // Apply adaptive rate limiting
     await RateLimitManager.waitForRateLimit('openalex', reporter)
     reporter?.(queryStepText('openalex'))
 
-    const url = `https://api.openalex.org/works/https://doi.org/${encodeURIComponent(normalizedDoi)}?select=cited_by_count,fwci&mailto=openalex@citationtally.org`
-    ztoolkit.log('Citation debug - Fetching from OpenAlex API:', url)
-
     try {
-      const fetchResponse = await fetch(url)
+      const url = `https://api.openalex.org/works/https://doi.org/${encodeURIComponent(doi)}?select=cited_by_count,fwci`
+      const fetchResponse = await fetchWithTimeout(url)
 
       if (fetchResponse.status === 404) {
-        ztoolkit.log('Citation debug - DOI not found in OpenAlex:', identifier.id)
         return { count: 0, status: 'not_found', message: 'DOI not found in OpenAlex' }
       }
-
       if (fetchResponse.status === 429) {
         RateLimitManager.handleRateLimit('openalex')
         return { count: -1, status: 'rate_limited', message: 'OpenAlex API rate limit exceeded' }
       }
+      if (!fetchResponse.ok) {
+        return { count: -1, status: 'api_error', message: `OpenAlex HTTP ${fetchResponse.status}` }
+      }
 
-      const response: any = await fetchResponse.json().catch((error) => {
-        ztoolkit.log('Citation debug - OpenAlex API response parse error:', error)
-        return null
-      })
-
+      const response = await readJson(fetchResponse)
       if (response === null) {
         return { count: -1, status: 'api_error', message: 'OpenAlex API response parsing failed' }
       }
 
-      ztoolkit.log('Citation debug - OpenAlex API response:', JSON.stringify(response).substring(0, 500) + '...')
-
-      const count: unknown = response.cited_by_count
-      const fwci: unknown = response.fwci
-
-      if (count === undefined && fwci === undefined) {
-        return { count: 0, status: 'not_found', message: 'No data in OpenAlex response' }
+      const count = parseCount(response.cited_by_count)
+      const fwciValue = parseCount(response.fwci)
+      if (count === null && fwciValue === null) {
+        if (response.cited_by_count === undefined && response.fwci === undefined) {
+          return { count: 0, status: 'not_found', message: 'No data in OpenAlex response' }
+        }
+        return { count: -1, status: 'api_error', message: 'Invalid citation data in OpenAlex response' }
       }
-
-      const resultCount = typeof count === 'number' ? count : typeof count === 'string' ? parseInt(count) : 0
 
       RateLimitManager.handleSuccess('openalex')
       return {
-        count: isNaN(resultCount) ? 0 : resultCount,
+        count: count ?? 0,
         status: 'success',
-        fwci: typeof fwci === 'number' ? fwci : undefined,
+        fwci: fwciValue ?? undefined,
       }
     } catch (err) {
       ztoolkit.log('Error getting citation count from OpenAlex', err)
@@ -1584,10 +1127,23 @@ const notifierCallback = {
           'New regular items added with IDs:',
           items.map((item) => item.id),
         )
-        updateItems(items)
+        // Do not go through `updateItems`: that resets the shared manual queue
+        // and would cancel an update the user explicitly started.
+        void updateNewItemsSilently(items)
       }
     }
   },
+}
+
+async function updateNewItemsSilently(items: Zotero.Item[]): Promise<void> {
+  for (const item of items) {
+    if (!addon.data.alive) return
+    try {
+      await updateItem(item, undefined, true, false, false)
+    } catch (e) {
+      ztoolkit.log('Fetch-on-add failed for item:', item.id, e)
+    }
+  }
 }
 
 // Progress window tracking
@@ -1726,9 +1282,9 @@ function updateItems(items: Zotero.Item[], operations?: string[] | string, silen
  * @param operation Citation source to use
  */
 function updateNextItem(operations?: string[] | string, silent: boolean = false, runToken: number = manualRunToken) {
-  // A newer manual run has started; this chain is stale and must not touch the
-  // shared queue or progress window any more.
-  if (runToken !== manualRunToken) return
+  // A newer manual run has started, or the plugin is shutting down; this chain
+  // is stale and must not touch the shared queue or progress window any more.
+  if (runToken !== manualRunToken || !addon.data.alive) return
 
   // Move to next item
   currentIndex++
@@ -1810,251 +1366,272 @@ async function updateItem(
   advanceQueue: boolean = true,
   onStep?: StepReporter,
   runToken: number = manualRunToken,
-) {
+): Promise<UpdateOutcome> {
+  const outcome: UpdateOutcome = { success: false, wrote: false, transient: false, statuses: {} }
+
   try {
+    if (!addon.data.alive) return outcome
     ztoolkit.log('Citation debug - Updating item:', item.id, 'title:', item.getField('title'))
 
     const databases = Helpers.getDatabaseArray(operations)
     if (databases.length === 0) {
       ztoolkit.log('Citation debug - No databases configured, skipping item:', item.id)
-    } else {
-      const data: CountArray = []
-      for (const operation of databases) {
-        // Check if this item is marked as ignored for this database (auto-update only)
-        if (isAutoUpdate && IgnoredItemsManager.isIgnored(item.id, operation, true)) {
-          ztoolkit.log(`Citation debug - Skipping ${operation} for item ${item.id} (marked as ignored)`)
-          continue
-        }
+      return outcome
+    }
 
-        let result: LookupResult
-        let displayName = ''
-        // Announce the lookup before dispatching: some databases return early
-        // (e.g. missing identifier), and the step line should still name them.
-        onStep?.(queryStepText(operation))
-        const lookupStart = Date.now()
-        if (operation === 'crossref') {
-          ztoolkit.log('Citation debug - DOI:', item.getField('DOI'))
-          result = await DBInterface.getCrossrefCountEnhanced(item, onStep)
-          displayName = getOperationName(operation)
-        } else if (operation === 'inspire') {
-          result = await DBInterface.getInspireCountEnhanced(item, onStep)
-          displayName = getOperationName(operation)
-        } else if (operation === 'semanticscholar') {
-          result = await DBInterface.getSemanticScholarCountEnhanced(item, onStep)
-          displayName = getOperationName(operation)
-        } else if (operation === 'openalex') {
-          result = await DBInterface.getOpenAlexCountEnhanced(item, onStep)
-          displayName = getOperationName(operation)
-        } else {
-          continue
-        }
-        ztoolkit.log(
-          `Citation timing - ${operation} lookup for item ${item.id} took ${Date.now() - lookupStart}ms (${result.status})`,
-        )
-
-        // Handle the result and update tracking
-        if (result.status === 'not_found') {
-          ztoolkit.log(`Citation debug - ${operation} confirmed item ${item.id} as not found`)
-          IgnoredItemsManager.markAsIgnored(item.id, operation, 'not_found', true)
-        } else if (result.status === 'no_identifier') {
-          ztoolkit.log(`Citation debug - ${operation} no identifier for item ${item.id}`)
-          IgnoredItemsManager.markAsIgnored(item.id, operation, 'no_identifier', false)
-        } else if (result.status === 'success' && result.count >= 0) {
-          // Clear any previous ignored status on successful result
-          ztoolkit.log(`Citation debug - ${operation} success for item ${item.id}: count=${result.count}`)
-          IgnoredItemsManager.clearIgnoredItem(item.id, operation)
-          data.push({ title: displayName, count: result.count, fwci: result.fwci })
-        } else if (result.status === 'rate_limited') {
-          ztoolkit.log(`Citation debug - ${operation} rate limited for item ${item.id}: ${result.message}`)
-          // Don't mark as ignored for rate limits - purely temporary
-        } else if (result.status === 'api_error') {
-          ztoolkit.log(`Citation debug - ${operation} API error for item ${item.id}: ${result.message}`)
-
-          // Track persistent API errors during autoupdate to prevent repeated attempts
-          if (isAutoUpdate) {
-            IgnoredItemsManager.markAsIgnored(item.id, operation, 'api_error', true)
-          }
-        }
+    const data: CountArray = []
+    for (const operation of databases) {
+      // Manual updates bypass the backoff; automatic updates respect it.
+      if (isAutoUpdate && IgnoredItemsStore.isBlocked(item.id, operation)) {
+        outcome.statuses[operation] = 'not_found'
+        ztoolkit.log(`Citation debug - Skipping ${operation} for item ${item.id} (backoff active)`)
+        continue
       }
 
-      ztoolkit.log('Citation debug - Retrieved count:', data)
-
-      if (data.length > 0) {
-        // setCitationCount announces the save step itself, and only when it
-        // actually writes. Announcing it here would also fire for no-ops where
-        // today's entries already exist.
-        const saveStart = Date.now()
-        const wrote = await Core.setCitationCount(item, data, onStep)
-        ztoolkit.log(`Citation timing - saving item ${item.id} took ${Date.now() - saveStart}ms (wrote: ${wrote})`)
-        // Only count items for the manual queue summary; auto-update tracks its
-        // own counters and must not inflate the manual run's total. Ignore
-        // results belonging to a superseded run as well.
-        if (!isAutoUpdate && runToken === manualRunToken) updatedCount++
+      let result: LookupResult
+      // Announce the lookup before dispatching: some databases return early
+      // (e.g. missing identifier), and the step line should still name them.
+      onStep?.(queryStepText(operation))
+      const lookupStart = Date.now()
+      if (operation === 'crossref') {
+        result = await DBInterface.getCrossrefCountEnhanced(item, onStep)
+      } else if (operation === 'inspire') {
+        result = await DBInterface.getInspireCountEnhanced(item, onStep)
+      } else if (operation === 'semanticscholar') {
+        result = await DBInterface.getSemanticScholarCountEnhanced(item, onStep)
+      } else if (operation === 'openalex') {
+        result = await DBInterface.getOpenAlexCountEnhanced(item, onStep)
       } else {
-        ztoolkit.log('Citation debug - No valid count retrieved, skipping update')
+        continue
       }
+      outcome.statuses[operation] = result.status
+      const took = Date.now() - lookupStart
+      ztoolkit.log(`Citation timing - ${operation} lookup for item ${item.id} took ${took}ms (${result.status})`)
+
+      if (result.status === 'success' && result.count >= 0) {
+        IgnoredItemsStore.clear(item.id, operation)
+        data.push({
+          title: DATABASE_STORAGE_NAMES[operation as DatabaseId] || operation,
+          count: result.count,
+          fwci: result.fwci,
+        })
+        outcome.success = true
+      } else if (result.status === 'not_found') {
+        // Only a confirmed 404, and only from automatic runs, may increase the
+        // persistent backoff. Manual checks must not make future auto-updates
+        // slower, and transient failures must not be remembered as 404s.
+        if (isAutoUpdate) {
+          IgnoredItemsStore.markNotFound(item.id, operation)
+        }
+      } else if (result.status === 'rate_limited' || result.status === 'api_error') {
+        outcome.transient = true
+        ztoolkit.log(`Citation debug - ${operation} temporary failure for item ${item.id}: ${result.message}`)
+      } else if (result.status === 'no_identifier') {
+        ztoolkit.log(`Citation debug - ${operation} has no applicable identifier for item ${item.id}`)
+      }
+    }
+
+    if (data.length > 0) {
+      const saveStart = Date.now()
+      outcome.wrote = await Core.setCitationCount(item, data, onStep)
+      ztoolkit.log(
+        `Citation timing - saving item ${item.id} took ${Date.now() - saveStart}ms (wrote: ${outcome.wrote})`,
+      )
+      // Only count real writes for the manual summary; a no-op means today's
+      // entries were already there. Ignore results from a superseded run.
+      if (outcome.wrote && !isAutoUpdate && runToken === manualRunToken) updatedCount++
+    } else {
+      ztoolkit.log('Citation debug - No valid count retrieved, skipping update')
     }
   } catch (e) {
     ztoolkit.log('Error updating citation count for item', e)
+    outcome.transient = true
+  } finally {
+    // Process next item in the manual queue
+    if (advanceQueue) {
+      void updateNextItem(operations, silent, runToken)
+    }
   }
 
-  // Process next item in the manual queue
-  if (advanceQueue) {
-    void updateNextItem(operations, silent, runToken)
-  }
+  return outcome
 }
 
 class BasicRegistrar {
-  static registerPrefs() {
-    void Zotero.PreferencePanes.register({
-      pluginID: addon.data.config.addonID,
-      src: rootURI + 'content/preferences.xhtml',
-      label: getString('prefs-title'),
-      image: `chrome://${addon.data.config.addonRef}/content/icons/favicon.png`,
-    })
+  static async registerPrefs(): Promise<void> {
+    try {
+      await Zotero.PreferencePanes.register({
+        pluginID: addon.data.config.addonID,
+        src: rootURI + 'content/preferences.xhtml',
+        label: getString('prefs-title'),
+        image: `chrome://${addon.data.config.addonRef}/content/icons/favicon.png`,
+      })
+    } catch (e) {
+      ztoolkit.log('Failed to register preference pane:', e)
+    }
   }
 }
+
+// MenuManager registrations are global, not per window. Registering the same
+// menu IDs again for every window throws on some Zotero versions.
+let citationMenuManagerRegistered = false
+let retallyMenuManagerRegistered = false
 
 class UIRegistrar {
   /**
    * Register custom column to display citation counts
    */
   static registerCitationColumn() {
-    ztoolkit.log('Citation debug - Registering citation count column')
-    Zotero.ItemTreeManager.registerColumn({
-      pluginID: addon.data.config.addonID,
-      dataKey: 'citationCount',
-      label: getString('column-citations'),
-      width: '80',
-      // staticWidth: true,
-      flex: 0,
-      zoteroPersist: ['width', 'ordinal', 'hidden', 'sortDirection'],
-      dataProvider: (item: Zotero.Item) => {
-        const result = Core.getCitationCountForColumn(item)
-        if (!result) {
-          return ''
-        }
-        // Zero-pad the counts so the tree's string-based sort is numeric;
-        // renderCell strips the padding for display.
-        const counts = result.counts.map((count) => (count === '-' ? count : count.padStart(SORT_PAD_WIDTH, '0')))
-        return JSON.stringify({ counts, databases: result.databases })
-      },
-      // iconPath: 'chrome://zotero/skin/citations.png',
-      renderCell(index, data: any, column, isFirstColumn, doc) {
-        const span = doc.createElement('span')
-        span.className = `cell ${column.className}`
-        span.style.textAlign = 'center'
+    try {
+      ztoolkit.log('Citation debug - Registering citation count column')
+      Zotero.ItemTreeManager.registerColumn({
+        pluginID: addon.data.config.addonID,
+        dataKey: 'citationCount',
+        label: getString('column-citations'),
+        width: '80',
+        // staticWidth: true,
+        flex: 0,
+        zoteroPersist: ['width', 'ordinal', 'hidden', 'sortDirection'],
+        dataProvider: (item: Zotero.Item) => {
+          const result = Core.getCitationCountForColumn(item)
+          if (!result) {
+            return ''
+          }
+          // Zero-pad the counts so the tree's string-based sort is numeric;
+          // renderCell strips the padding for display.
+          const counts = result.counts.map((count) => (count === '-' ? count : count.padStart(SORT_PAD_WIDTH, '0')))
+          return JSON.stringify({ counts, databases: result.databases })
+        },
+        // iconPath: 'chrome://zotero/skin/citations.png',
+        renderCell(index, data: any, column, isFirstColumn, doc) {
+          const span = doc.createElement('span')
+          span.className = `cell ${column.className}`
+          span.style.textAlign = 'center'
 
-        // Parse JSON data if it's a string
-        let parsedData: { counts: string[]; databases: string[] } | null = null
-        if (data && typeof data === 'string') {
-          try {
-            parsedData = JSON.parse(data)
-          } catch (e) {
-            // Display as text if JSON parsing fails
-            span.innerText = data
+          // Parse JSON data if it's a string
+          let parsedData: { counts: string[]; databases: string[] } | null = null
+          if (data && typeof data === 'string') {
+            try {
+              parsedData = JSON.parse(data)
+            } catch (e) {
+              // Display as text if JSON parsing fails
+              span.innerText = data
+              return span
+            }
+          } else if (!data) {
+            span.innerText = ''
             return span
           }
-        } else if (!data) {
-          span.innerText = ''
-          return span
-        }
 
-        // Create colored spans for each count
-        const dataToUse = parsedData || data
-        const useColors = getPref('useColors') === 'color' && dataToUse.databases.length > 1
+          // Create colored spans for each count
+          const dataToUse = parsedData || data
+          const useColors = getPref('useColors') === 'color' && dataToUse.databases.length > 1
+          const databaseColors = getDatabaseColors()
+          // Unknown sources must remain readable in both themes; black text is
+          // invisible on a dark background.
+          const fallbackColor = isLightMode() ? '#000000' : '#ffffff'
 
-        // Strip the zero-padding used for sorting before displaying
-        const displayCounts = dataToUse.counts.map((count: string) =>
-          count === '-' ? count : String(parseInt(count, 10)),
-        )
+          // Strip the zero-padding used for sorting before displaying
+          const displayCounts = dataToUse.counts.map((count: string) =>
+            count === '-' ? count : String(parseInt(count, 10)),
+          )
 
-        displayCounts.forEach((count: string, idx: number) => {
-          if (idx > 0) {
-            const separator = doc.createElement('span')
-            separator.innerText = ' | '
-            separator.style.opacity = '0.25'
-            span.appendChild(separator)
-          }
+          displayCounts.forEach((count: string, idx: number) => {
+            if (idx > 0) {
+              const separator = doc.createElement('span')
+              separator.innerText = ' | '
+              separator.style.opacity = '0.25'
+              span.appendChild(separator)
+            }
 
-          const countSpan = doc.createElement('span')
-          countSpan.innerText = count
-          if (useColors) {
-            countSpan.style.color = getDatabaseColors()[dataToUse.databases[idx]] || '#000'
-            countSpan.style.fontWeight = '500'
-          }
-          span.appendChild(countSpan)
-        })
-
-        // Add tooltip with database names
-        const tooltip = dataToUse.databases
-          .map((db: string, idx: number) => {
-            const displayName = getOperationName(db)
-            return getString('tooltip-citation-tallies', { args: { displayName, count: displayCounts[idx] } })
+            const countSpan = doc.createElement('span')
+            countSpan.innerText = count
+            if (useColors) {
+              countSpan.style.color = databaseColors[dataToUse.databases[idx]] || fallbackColor
+              countSpan.style.fontWeight = '500'
+            }
+            span.appendChild(countSpan)
           })
-          .join(', ')
-        span.title = tooltip
 
-        return span
-      },
-    })
-    ztoolkit.log('Citation debug - Column registration complete')
+          // Add tooltip with database names
+          const tooltip = dataToUse.databases
+            .map((db: string, idx: number) => {
+              const displayName = getOperationName(db)
+              return getString('tooltip-citation-tallies', { args: { displayName, count: displayCounts[idx] } })
+            })
+            .join(', ')
+          span.title = tooltip
+
+          return span
+        },
+      })
+      ztoolkit.log('Citation debug - Column registration complete')
+    } catch (e) {
+      ztoolkit.log('Failed to register citation column:', e)
+    }
   }
 
   /**
    * Register custom column to display FWCI (Field-Weighted Citation Impact)
    */
   static registerFWCIColumn() {
-    ztoolkit.log('Citation debug - Registering FWCI column')
-    Zotero.ItemTreeManager.registerColumn({
-      pluginID: addon.data.config.addonID,
-      dataKey: 'fwci',
-      label: getString('column-fwci'),
-      width: '60',
-      flex: 0,
-      zoteroPersist: ['width', 'ordinal', 'hidden', 'sortDirection'],
-      dataProvider: (item: Zotero.Item) => {
-        const value = Core.getFWCIForColumn(item)
-        return value === '-' ? '-' : value.padStart(SORT_PAD_WIDTH, '0')
-      },
-      renderCell(index, data: any, column, isFirstColumn, doc) {
-        const span = doc.createElement('span')
-        span.className = `cell ${column.className}`
-        span.style.textAlign = 'center'
-        const num = parseFloat(data)
-        span.innerText = data && !isNaN(num) ? num.toFixed(2) : '-'
-        return span
-      },
-    })
-    ztoolkit.log('Citation debug - FWCI Column registration complete')
+    try {
+      ztoolkit.log('Citation debug - Registering FWCI column')
+      Zotero.ItemTreeManager.registerColumn({
+        pluginID: addon.data.config.addonID,
+        dataKey: 'fwci',
+        label: getString('column-fwci'),
+        width: '60',
+        flex: 0,
+        zoteroPersist: ['width', 'ordinal', 'hidden', 'sortDirection'],
+        dataProvider: (item: Zotero.Item) => {
+          const value = Core.getFWCIForColumn(item)
+          return value === '-' ? '-' : value.padStart(SORT_PAD_WIDTH, '0')
+        },
+        renderCell(index, data: any, column, isFirstColumn, doc) {
+          const span = doc.createElement('span')
+          span.className = `cell ${column.className}`
+          span.style.textAlign = 'center'
+          const num = parseFloat(data)
+          span.innerText = data && !isNaN(num) ? num.toFixed(2) : '-'
+          return span
+        },
+      })
+      ztoolkit.log('Citation debug - FWCI Column registration complete')
+    } catch (e) {
+      ztoolkit.log('Failed to register FWCI column:', e)
+    }
   }
 
   /**
    * Register custom column to display average citations per year
    */
   static registerAvgCiteColumn() {
-    ztoolkit.log('Citation debug - Registering AvgCite column')
-    Zotero.ItemTreeManager.registerColumn({
-      pluginID: addon.data.config.addonID,
-      dataKey: 'avgCite',
-      label: getString('column-avgcite'),
-      width: '60',
-      flex: 0,
-      zoteroPersist: ['width', 'ordinal', 'hidden', 'sortDirection'],
-      dataProvider: (item: Zotero.Item) => {
-        const value = Core.getAvgCiteForColumn(item)
-        return value === '-' ? '-' : value.padStart(SORT_PAD_WIDTH, '0')
-      },
-      renderCell(index, data: any, column, isFirstColumn, doc) {
-        const span = doc.createElement('span')
-        span.className = `cell ${column.className}`
-        span.style.textAlign = 'center'
-        const num = parseFloat(data)
-        span.innerText = data && !isNaN(num) ? num.toFixed(2) : '-'
-        return span
-      },
-    })
-    ztoolkit.log('Citation debug - AvgCite Column registration complete')
+    try {
+      ztoolkit.log('Citation debug - Registering AvgCite column')
+      Zotero.ItemTreeManager.registerColumn({
+        pluginID: addon.data.config.addonID,
+        dataKey: 'avgCite',
+        label: getString('column-avgcite'),
+        width: '60',
+        flex: 0,
+        zoteroPersist: ['width', 'ordinal', 'hidden', 'sortDirection'],
+        dataProvider: (item: Zotero.Item) => {
+          const value = Core.getAvgCiteForColumn(item)
+          return value === '-' ? '-' : value.padStart(SORT_PAD_WIDTH, '0')
+        },
+        renderCell(index, data: any, column, isFirstColumn, doc) {
+          const span = doc.createElement('span')
+          span.className = `cell ${column.className}`
+          span.style.textAlign = 'center'
+          const num = parseFloat(data)
+          span.innerText = data && !isNaN(num) ? num.toFixed(2) : '-'
+          return span
+        },
+      })
+      ztoolkit.log('Citation debug - AvgCite Column registration complete')
+    } catch (e) {
+      ztoolkit.log('Failed to register AvgCite column:', e)
+    }
   }
 
   /**
@@ -2094,6 +1671,7 @@ class UIRegistrar {
   static registerCitationCountMenuItem() {
     // Zotero 8+/9 path: use MenuManager API
     if ((Zotero as any).MenuManager?.registerMenu) {
+      if (citationMenuManagerRegistered) return
       const showWhen = () => {
         try {
           const zoteroPane = Zotero.getActiveZoteroPane()
@@ -2164,6 +1742,9 @@ class UIRegistrar {
           },
         ],
       })
+      // Only mark the group as registered after every menu was accepted, so a
+      // failure in one call can be retried the next time a window loads.
+      citationMenuManagerRegistered = true
       return
     }
 
@@ -2227,6 +1808,7 @@ class UIRegistrar {
   static registerRetallyCitationsMenuItem() {
     // Zotero 8+/9 path: use MenuManager API
     if ((Zotero as any).MenuManager?.registerMenu) {
+      if (retallyMenuManagerRegistered) return
       ;(Zotero as any).MenuManager.registerMenu({
         menuID: `${addon.data.config.addonID}-retally-citations`,
         pluginID: addon.data.config.addonID,
@@ -2239,6 +1821,7 @@ class UIRegistrar {
           },
         ],
       })
+      retallyMenuManagerRegistered = true
       return
     }
 
@@ -2282,9 +1865,12 @@ class UIRegistrar {
    * Remove menu items injected into Zotero 7 menus (the MenuManager path is
    * cleaned up by Zotero itself). Call on window unload and plugin shutdown.
    */
-  static unregisterZotero7Menus(): void {
-    for (const win of Zotero.getMainWindows()) {
-      win.document
+  static unregisterZotero7Menus(win?: Window): void {
+    // On window unload only this window's DOM exists; cleaning every window
+    // would remove the menus from windows that are still open.
+    const windows = win ? [win] : Zotero.getMainWindows()
+    for (const target of windows) {
+      target.document
         .querySelectorAll(`[${UIRegistrar.zotero7InjectedAttr}]`)
         .forEach((element: Element) => element.remove())
     }
@@ -2444,11 +2030,13 @@ class UX {
       try {
         for (let offset = 0; offset < pending.length; offset += SAVE_CHUNK_SIZE) {
           const chunk = pending.slice(offset, offset + SAVE_CHUNK_SIZE)
-          await Zotero.DB.executeTransaction(async () => {
-            for (const { item, entry } of chunk) {
-              await Core.storeAvgCiteEntry(item, entry)
-            }
-          })
+          await withExtraWriteLock(() =>
+            Zotero.DB.executeTransaction(async () => {
+              for (const { item, entry } of chunk) {
+                await Core.storeAvgCiteEntry(item, entry)
+              }
+            }),
+          )
           committed += chunk.length
           safeChangeLine(progressWindow, {
             text: getString('progress-saving-counter', { args: { current: committed, total: pending.length } }),

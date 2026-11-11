@@ -38,12 +38,24 @@ for (const filename of candidates) {
   if (!existsSync(filepath)) continue
 
   const data = JSON.parse(readFileSync(filepath, 'utf-8'))
-  const addonId = Object.keys(data.addons)[0]
+  const addonId = Object.keys(data.addons || {})[0]
+  const updates = addonId ? data.addons[addonId]?.updates : null
 
-  data.addons[addonId].updates.push(...LEGACY_ENTRIES)
+  if (!Array.isArray(updates)) {
+    console.warn(`Skipping ${filename}: unexpected update manifest structure`)
+    continue
+  }
 
-  writeFileSync(filepath, JSON.stringify(data, null, 2) + '\n', 'utf-8')
-  console.log(`Injected ${LEGACY_ENTRIES.length} legacy update entries into ${filename}`)
+  // Builds are sometimes run repeatedly; do not append duplicates.
+  const existingVersions = new Set(updates.map((update) => update.version))
+  const missing = LEGACY_ENTRIES.filter((entry) => !existingVersions.has(entry.version))
+
+  if (missing.length > 0) {
+    updates.push(...missing)
+    writeFileSync(filepath, JSON.stringify(data, null, 2) + '\n', 'utf-8')
+  }
+
+  console.log(`Injected ${missing.length} legacy update entries into ${filename}`)
   patched++
 }
 

@@ -14,6 +14,7 @@ declare namespace _ZoteroTypes {
       "autoUpdateCutoff": string;
       "useColors": string;
       "ignoredItems": string;
+      "lastIgnoredCleanup": string;
       "rateLimits": string;
     };
   }

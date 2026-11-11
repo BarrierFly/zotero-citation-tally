@@ -1,31 +1,33 @@
 import { config } from '../../package.json'
+import { getLocaleID } from '../utils/locale'
 import { getPref, setPref } from '../utils/prefs'
 
-// Get localized string in preferences context - using hardcoded strings since
-// preferences window has different localization context that's hard to access
-function getPrefsString(key: string): string {
-  const strings: Record<string, string> = {
-    'pref-database-valid': 'Valid database configuration',
-    'pref-database-duplicate': 'Duplicate databases found',
-    'pref-database-invalid': 'Invalid database(s): %s',
-    'pref-database-count': 'Please enter 1-4 databases',
-    'pref-database-empty': 'Please enter at least one database',
+/**
+ * Validate against the localized strings shipped with the preference pane
+ * (`preferences.ftl`). The addon localization instance only loads addon.ftl,
+ * so use the preference document's own Fluent bundle.
+ */
+async function getPrefsString(key: string, args?: Record<string, unknown>): Promise<string> {
+  try {
+    const doc = addon.data.prefs?.window?.document as
+      | (Document & {
+          l10n?: {
+            ready?: Promise<unknown>
+            formatValue: (id: string, args?: Record<string, unknown>) => Promise<string>
+          }
+        })
+      | undefined
+    if (doc?.l10n?.formatValue) {
+      // Fluent may still be loading the linkset when the pane first loads.
+      if (doc.l10n.ready) await doc.l10n.ready
+      const value = await doc.l10n.formatValue(getLocaleID(key), args)
+      if (value) return value
+    }
+  } catch (e) {
+    ztoolkit.log('Failed to load preference string:', key, e)
   }
-  return strings[key] || key
+  return key
 }
-
-// export registerStyleSheet(_window: Window) {
-//   const doc = win.document
-//   const styles = ztoolkit.UI.createElement(doc, 'link', {
-//     properties: {
-//       type: 'text/css',
-//       rel: 'stylesheet',
-//       href: `chrome://${addon.data.config.addonRef}/content/zoteroPrefsPane.css`,
-//     },
-//   })
-//   doc.documentElement?.appendChild(styles)
-//   // doc.getElementById('zotero-item-pane-content')?.classList.add('makeItRed')
-// }
 
 export async function registerPrefsScripts(_window: Window) {
   // See addon/content/preferences.xhtml onpaneload
@@ -53,16 +55,8 @@ function bindPrefEvents() {
     const currentValue = getPref('databaseOrder') || 'crossref'
     ;(databaseOrderElement as HTMLInputElement).value = currentValue
 
-    // Add change listener to save preference and refresh column
-    // databaseOrderElement.addEventListener('change', () => {
-    //   const value = databaseOrderElement.value.trim()
-    //   if (value) {
-    //     setPref('databaseOrderExposed', value)
-    //     // Don't automatically save to databaseOrder - only do that on validation
-    //   }
-    // })
     databaseOrderElement.addEventListener('focusout', () => {
-      validateDatabaseOrder(window)
+      void validateDatabaseOrder(window)
     })
   }
 
@@ -95,13 +89,11 @@ function bindPrefEvents() {
   }
 }
 
-interface Validation {
+export interface Validation {
   valid: boolean
-  message: string
-  // constructor(valid: boolean, message: string) {
-  //   this.valid = valid
-  //   this.message = message
-  // }
+  /** Fluent message ID from preferences.ftl; resolved by the caller. */
+  messageId: string
+  messageArgs?: Record<string, unknown>
 }
 
 export function validateDatabaseOrderValue(inputValue: string, andSave: boolean = true): Validation {
@@ -116,18 +108,28 @@ export function validateDatabaseOrderValue(inputValue: string, andSave: boolean 
   // Check for duplicates
   const uniqueDatabases = [...new Set(databases)]
   if (uniqueDatabases.length !== databases.length) {
-    return { valid: false, message: getPrefsString('pref-database-duplicate') }
+    return { valid: false, messageId: 'pref-database-duplicate' }
   }
 
   // Check if all databases are valid
   const invalidDatabases = databases.filter((db: string) => !validDatabases.includes(db))
   if (invalidDatabases.length > 0) {
-    return { valid: false, message: getPrefsString('pref-database-invalid').replace('%s', invalidDatabases.join(', ')) }
+    return {
+      valid: false,
+      messageId: 'pref-database-invalid',
+      // Passed as a Fluent variable; never interpolated through `String.replace`,
+      // which would treat `$&` in user input as a replacement pattern.
+      messageArgs: { databases: invalidDatabases.join(', ') },
+    }
+  }
+
+  if (databases.length === 0) {
+    return { valid: false, messageId: 'pref-database-empty' }
   }
 
   // Check length (1-4 databases)
-  if (databases.length === 0 || databases.length > 4) {
-    return { valid: false, message: getPrefsString('pref-database-count') }
+  if (databases.length > 4) {
+    return { valid: false, messageId: 'pref-database-count' }
   }
 
   // Save the validated order to hidden preference
@@ -135,33 +137,27 @@ export function validateDatabaseOrderValue(inputValue: string, andSave: boolean 
     setPref('databaseOrder', databases.join(','))
   }
 
-  return { valid: true, message: getPrefsString('pref-database-valid') }
+  return { valid: true, messageId: 'pref-database-valid' }
 }
 
-export function validationMarkup(validation: Validation, inputElement: Element, statusElement: Element) {
-  if (!inputElement || !statusElement) return
+export async function validationMarkup(validation: Validation, statusElement: Element) {
+  if (!statusElement) return
 
-  // Clear status
-  statusElement.innerHTML = ''
-  ;(statusElement as HTMLElement).style.color = ''
-
-  statusElement.innerHTML = validation.message
-  ;(statusElement as HTMLElement).style.color = validation.valid ? '#008000' : '#d70022'
+  const message = await getPrefsString(validation.messageId, validation.messageArgs)
+  const element = statusElement as HTMLElement
+  // textContent: the value comes from a Fluent bundle (or the message ID),
+  // never from raw user input, but avoid `innerHTML` as a rule.
+  element.textContent = message
+  element.style.color = validation.valid ? '#008000' : '#d70022'
 }
 
-export function validateDatabaseOrder(window: Window, andSave: boolean = true) {
+export async function validateDatabaseOrder(window: Window, andSave: boolean = true) {
   const inputElement = window.document?.querySelector(`#zotero-prefpane-${config.addonRef}-databaseOrderExposed`)
   const statusElement = window.document?.querySelector(`#zotero-prefpane-${config.addonRef}-database-status`)
 
   if (!inputElement || !statusElement) return
 
-  // Clear status
-  statusElement.innerHTML = ''
-  ;(statusElement as HTMLElement).style.color = ''
-
   const inputValue = ((inputElement as HTMLInputElement).value || '').trim().toLowerCase()
-
-  const validation: Validation = validateDatabaseOrderValue(inputValue, andSave)
-
-  validationMarkup(validation, inputElement, statusElement)
+  const validation = validateDatabaseOrderValue(inputValue, andSave)
+  await validationMarkup(validation, statusElement)
 }

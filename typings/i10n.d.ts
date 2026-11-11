@@ -4,6 +4,7 @@
 // @ts-nocheck
 export type FluentMessageId =
   | 'auto-update-completed'
+  | 'auto-update-connection-error'
   | 'auto-update-connection-retry'
   | 'auto-update-none'
   | 'auto-update-scanning'
@@ -41,6 +42,7 @@ export type FluentMessageId =
   | 'pref-auto-update-cutoff-3'
   | 'pref-auto-update-cutoff-6'
   | 'pref-auto-update-cutoff-label'
+  | 'pref-auto-update-description'
   | 'pref-auto-update-never'
   | 'pref-auto-update-settings'
   | 'pref-auto-update-startup'
@@ -51,6 +53,8 @@ export type FluentMessageId =
   | 'pref-database-empty'
   | 'pref-database-instructions'
   | 'pref-database-invalid'
+  | 'pref-database-options'
+  | 'pref-database-placeholder'
   | 'pref-database-valid'
   | 'pref-fetch-on-add'
   | 'pref-fetch-on-add-disabled'
@@ -59,6 +63,7 @@ export type FluentMessageId =
   | 'pref-no-colors'
   | 'pref-title'
   | 'pref-use-colors'
+  | 'pref-use-colors-description'
   | 'pref-validate-button'
   | 'prefs-table-detail'
   | 'prefs-table-title'

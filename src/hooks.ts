@@ -1,5 +1,6 @@
-import { startAutomaticUpdate } from './modules/citationAutoupdate'
+import { startAutomaticUpdate, stopAutomaticUpdate } from './modules/citationAutoupdate'
 import { BasicRegistrar, scheduleMonthlyCleanup, stopMonthlyCleanup, UIRegistrar, UX } from './modules/citationTally'
+import { IgnoredItemsStore } from './modules/ignoredItems'
 /* PUBIGNORE 
 import {
   BasicExampleFactory,
@@ -19,19 +20,38 @@ async function onStartup() {
 
   initLocale()
 
-  BasicRegistrar.registerPrefs()
+  await BasicRegistrar.registerPrefs()
 
-  // Register citation count notifier to detect new items
-  UIRegistrar.registerNotifier()
+  // Each registration is isolated: one failing API (e.g. a removed
+  // ItemTreeManager hook on an older Zotero) must not prevent the rest of the
+  // plugin from loading.
+  try {
+    // Register citation count notifier to detect new items
+    UIRegistrar.registerNotifier()
+  } catch (e) {
+    ztoolkit.log('Failed to register item notifier:', e)
+  }
 
-  // Register custom column for citation counts
-  UIRegistrar.registerCitationColumn()
+  try {
+    // Register custom column for citation counts
+    UIRegistrar.registerCitationColumn()
+  } catch (e) {
+    ztoolkit.log('Failed to register citation column:', e)
+  }
 
-  // Register custom column for FWCI
-  UIRegistrar.registerFWCIColumn()
+  try {
+    // Register custom column for FWCI
+    UIRegistrar.registerFWCIColumn()
+  } catch (e) {
+    ztoolkit.log('Failed to register FWCI column:', e)
+  }
 
-  // Register custom column for average citations per year
-  UIRegistrar.registerAvgCiteColumn()
+  try {
+    // Register custom column for average citations per year
+    UIRegistrar.registerAvgCiteColumn()
+  } catch (e) {
+    ztoolkit.log('Failed to register AvgCite column:', e)
+  }
 
   // KeyExampleFactory.registerShortcuts()
 
@@ -47,8 +67,9 @@ async function onStartup() {
 
   await Promise.all(Zotero.getMainWindows().map((win) => onMainWindowLoad(win)))
 
-  // Start automatic citation updates if enabled
-  void startAutomaticUpdate()
+  // Start automatic citation updates if enabled. Errors are handled inside,
+  // but keep the promise from becoming an unhandled rejection.
+  startAutomaticUpdate().catch((error) => ztoolkit.log('Automatic update failed to start:', error))
 
   // Schedule cleanup of ignored items
   scheduleMonthlyCleanup()
@@ -89,13 +110,24 @@ async function onMainWindowLoad(win: _ZoteroTypes.MainWindow): Promise<void> {
 
   // UIExampleFactory.registerWindowMenuWithSeparator() // PUBIGNORE
 
-  // Register citation count update menu item
-  UIRegistrar.registerCitationCountMenuItem()
+  // Menu registration is global (MenuManager) or per-window (Zotero 7 DOM);
+  // both functions are idempotent, and a failure in one menu group must not
+  // stop the other from being added.
+  try {
+    // Register citation count update menu item
+    UIRegistrar.registerCitationCountMenuItem()
+  } catch (e) {
+    ztoolkit.log('Failed to register citation menu item:', e)
+  }
 
-  // Register retally outdated citations menubar item
-  UIRegistrar.registerRetallyCitationsMenuItem()
+  try {
+    // Register retally outdated citations menubar item
+    UIRegistrar.registerRetallyCitationsMenuItem()
+  } catch (e) {
+    ztoolkit.log('Failed to register retally menu item:', e)
+  }
 
-  // Register theme change observers to update column colors
+  // Theme observers are registered once for the plugin, not per window.
   UIRegistrar.registerThemeObservers()
 
   // PromptExampleFactory.registerNormalCommandExample() // PUBIGNORE
@@ -121,19 +153,53 @@ async function onMainWindowLoad(win: _ZoteroTypes.MainWindow): Promise<void> {
 }
 
 async function onMainWindowUnload(win: Window): Promise<void> {
-  ztoolkit.unregisterAll()
-  UIRegistrar.unregisterZotero7Menus()
-  addon.data.dialog?.window?.close()
+  try {
+    ztoolkit.unregisterAll()
+    // Only this window is going away; other windows still need their menus.
+    UIRegistrar.unregisterZotero7Menus(win)
+    addon.data.dialog?.window?.close()
+  } catch (e) {
+    ztoolkit.log('Error while unloading main window:', e)
+  }
 }
 
 function onShutdown(): void {
-  ztoolkit.unregisterAll()
-  UIRegistrar.unregisterZotero7Menus()
-  UIRegistrar.unregisterThemeObservers()
-  stopMonthlyCleanup()
-  addon.data.dialog?.window?.close()
-  // Remove addon object
   addon.data.alive = false
+
+  try {
+    stopAutomaticUpdate()
+  } catch (e) {
+    ztoolkit.log('Failed to stop automatic update:', e)
+  }
+
+  try {
+    stopMonthlyCleanup()
+  } catch (e) {
+    ztoolkit.log('Failed to stop cleanup timer:', e)
+  }
+
+  try {
+    // The debounced write may not have fired yet; persist it before the
+    // plugin's globals disappear.
+    IgnoredItemsStore.flush()
+  } catch (e) {
+    ztoolkit.log('Failed to flush ignored items:', e)
+  }
+
+  try {
+    UIRegistrar.unregisterThemeObservers()
+  } catch (e) {
+    ztoolkit.log('Failed to unregister theme observers:', e)
+  }
+
+  try {
+    ztoolkit.unregisterAll()
+    UIRegistrar.unregisterZotero7Menus()
+    addon.data.dialog?.window?.close()
+  } catch (e) {
+    ztoolkit.log('Error during shutdown cleanup:', e)
+  }
+
   // @ts-ignore - Plugin instance is not typed
   delete Zotero[addon.data.config.addonInstance]
 }
@@ -166,7 +232,7 @@ async function onPrefsEvent(type: string, data: Record<string, any>) {
       void registerPrefsScripts(data.window)
       break
     case 'validateDatabases':
-      validateDatabaseOrder(data.window)
+      void validateDatabaseOrder(data.window)
       break
     default:
       return
