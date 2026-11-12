@@ -183,6 +183,22 @@ yarn lint:check  # check formatting and lint
 
 The build output is written to `.scaffold/build/`.
 
+### Plugin sandbox constraints
+
+Zotero runs plugin code in a sandbox that injects only a whitelist of globals
+(`fetch`, `XMLHttpRequest`, `URL`, `TextDecoder`, `crypto`, …). `AbortController`
+and `structuredClone` are **not** available there. Referencing them throws a
+`ReferenceError` inside the plugin at runtime, while `tsc` and the unit tests
+still pass because Node provides them.
+
+`test/sandboxGlobals.test.ts` guards against this class of bug. Use
+`src/modules/http.ts` (`getJson`) for API calls: it goes through
+`Zotero.HTTP.request`, which provides real timeouts and honours the user's proxy
+configuration.
+
+Note also that `extra` is not a Zotero data type. Use the `reloadExtra` helper
+instead of `item.reload(['extra'], …)`, which silently does nothing.
+
 ## Related Projects
 
 - **[ZoteroCitationCountsManager](https://github.com/FrLars21/ZoteroCitationCountsManager)** by FrLars21

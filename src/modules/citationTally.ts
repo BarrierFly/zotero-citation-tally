@@ -12,7 +12,7 @@ import {
   pickLatestEntry,
   trimExtraHistory,
 } from './citationData'
-import { fetchWithTimeout, readJson } from './http'
+import { getJson } from './http'
 import { IgnoredItemsStore } from './ignoredItems'
 
 import type { DatabaseId, ParsedExtra } from './citationData'
@@ -464,6 +464,34 @@ function getParsedExtra(item: Zotero.Item): ParsedExtra {
   return parsed
 }
 
+/**
+ * Re-read just the Extra field from the database before writing to it.
+ *
+ * `extra` is not a Zotero data type — it lives inside `itemData` — so
+ * `item.reload(['extra'], true)` silently does nothing, and reloading all of
+ * `itemData` would also discard unrelated unsaved edits. Querying the one value
+ * keeps the item's other in-memory state intact while still preventing a
+ * concurrent plugin write from being overwritten.
+ */
+async function reloadExtra(item: Zotero.Item, logPrefix: string): Promise<void> {
+  if (!item.id) return
+  try {
+    const stored = await Zotero.DB.valueQueryAsync<string>(
+      `SELECT id.value FROM itemData id
+         JOIN fields f ON f.fieldID = id.fieldID
+        WHERE id.itemID = ? AND f.fieldName = 'extra'`,
+      [item.id],
+    )
+    const value = typeof stored === 'string' ? stored : ''
+    if (value !== (item.getField('extra') || '')) {
+      item.setField('extra', value)
+    }
+  } catch (e) {
+    // The item may have been deleted while the request was in flight.
+    ztoolkit.log(`${logPrefix} - Could not reload Extra before writing:`, e)
+  }
+}
+
 class Core {
   /**
    * Store citation count in the Extra field
@@ -480,11 +508,7 @@ class Core {
 
       // Re-read under the lock. Another run may have written since the caller
       // fetched this item.
-      try {
-        await item.reload(['extra'], true)
-      } catch (e) {
-        ztoolkit.log('Citation debug - Could not reload Extra before writing:', e)
-      }
+      await reloadExtra(item, 'Citation debug')
 
       const extra = item.getField('extra') || ''
       ztoolkit.log('Citation debug - Setting citation count for item:', item.id, 'count:', data)
@@ -701,11 +725,7 @@ class Core {
   static async storeAvgCiteEntry(item: Zotero.Item, newEntry: string): Promise<void> {
     // The batch path computes entries before it writes. Re-read here so a
     // citation update that landed in between is not overwritten.
-    try {
-      await item.reload(['extra'], true)
-    } catch (e) {
-      ztoolkit.log('AvgCite debug - Could not reload Extra before writing:', e)
-    }
+    await reloadExtra(item, 'AvgCite debug')
     const extra = item.getField('extra') || ''
     const extras = extra.split('\n')
     if (extras.includes(newEntry)) return
@@ -734,11 +754,7 @@ class Core {
     return withExtraWriteLock(async () => {
       if (!addon.data.alive) return false
       onStep?.(getString('progress-step-avgcite-reading'))
-      try {
-        await item.reload(['extra'], true)
-      } catch (e) {
-        ztoolkit.log('AvgCite debug - Could not reload Extra before writing:', e)
-      }
+      await reloadExtra(item, 'AvgCite debug')
       const newEntry = Core.computeAvgCiteEntry(item)
       if (newEntry === null) return false
 
@@ -797,44 +813,39 @@ class DBInterface {
     await RateLimitManager.waitForRateLimit('crossref', reporter)
     reporter?.(queryStepText('crossref'))
 
-    try {
-      // The search route with an explicit `select` is ~250 bytes instead of the
-      // ~200 KB CSL transform, and still returns the citation count.
-      const url = `https://api.crossref.org/works?filter=doi:${encodeURIComponent(
-        doi,
-      )}&rows=1&select=DOI,is-referenced-by-count`
-      const response = await fetchWithTimeout(url, {
-        headers: { Accept: 'application/json' },
-      })
+    // The search route with an explicit `select` is ~250 bytes instead of the
+    // ~200 KB CSL transform, and still returns the citation count.
+    const url = `https://api.crossref.org/works?filter=doi:${encodeURIComponent(
+      doi,
+    )}&rows=1&select=DOI,is-referenced-by-count`
+    const { status, data, error } = await getJson(url)
 
-      if (response.status === 404) {
-        return { count: 0, status: 'not_found', message: 'DOI not found in Crossref' }
-      }
-      if (response.status === 429) {
-        RateLimitManager.handleRateLimit('crossref')
-        return { count: -1, status: 'rate_limited', message: 'API rate limit exceeded' }
-      }
-      if (!response.ok) {
-        return { count: -1, status: 'api_error', message: `Crossref HTTP ${response.status}` }
-      }
-
-      const body = await readJson(response)
-      const items = body?.message?.items
-      if (!Array.isArray(items) || items.length === 0) {
-        return { count: 0, status: 'not_found', message: 'DOI not found in Crossref' }
-      }
-
-      const count = parseCount(items[0]?.['is-referenced-by-count'])
-      if (count === null) {
-        return { count: -1, status: 'api_error', message: 'Invalid citation count in Crossref response' }
-      }
-
-      RateLimitManager.handleSuccess('crossref')
-      return { count, status: 'success' }
-    } catch (err) {
-      ztoolkit.log('Error getting citation count from Crossref', err)
-      return { count: -1, status: 'api_error', message: (err as Error).message }
+    if (status === 0) {
+      return { count: -1, status: 'api_error', message: error || 'Crossref request failed' }
     }
+    if (status === 404) {
+      return { count: 0, status: 'not_found', message: 'DOI not found in Crossref' }
+    }
+    if (status === 429) {
+      RateLimitManager.handleRateLimit('crossref')
+      return { count: -1, status: 'rate_limited', message: 'API rate limit exceeded' }
+    }
+    if (status < 200 || status >= 300) {
+      return { count: -1, status: 'api_error', message: `Crossref HTTP ${status}` }
+    }
+
+    const items = data?.message?.items
+    if (!Array.isArray(items) || items.length === 0) {
+      return { count: 0, status: 'not_found', message: 'DOI not found in Crossref' }
+    }
+
+    const count = parseCount(items[0]?.['is-referenced-by-count'])
+    if (count === null) {
+      return { count: -1, status: 'api_error', message: 'Invalid citation count in Crossref response' }
+    }
+
+    RateLimitManager.handleSuccess('crossref')
+    return { count, status: 'success' }
   }
 
   /**
@@ -882,41 +893,35 @@ class DBInterface {
       await RateLimitManager.waitForRateLimit('inspire', reporter)
       reporter?.(queryStepText('inspire'))
 
-      try {
-        const url = `https://inspirehep.net/api/${path}`
-        const fetchResponse = await fetchWithTimeout(url)
+      const url = `https://inspirehep.net/api/${path}`
+      const { status, data, error } = await getJson(url)
 
-        if (fetchResponse.status === 404) {
-          sawNotFound = true
-          continue
-        }
-        if (fetchResponse.status === 429) {
-          RateLimitManager.handleRateLimit('inspire')
-          return { count: -1, status: 'rate_limited', message: 'API rate limit exceeded' }
-        }
-        if (!fetchResponse.ok) {
-          sawApiError = true
-          continue
-        }
-
-        const response = await readJson(fetchResponse)
-        if (response === null) {
-          sawApiError = true
-          continue
-        }
-
-        const count = parseCount(response?.metadata?.citation_count)
-        if (count === null) {
-          sawApiError = true
-          continue
-        }
-
-        RateLimitManager.handleSuccess('inspire')
-        return { count, status: 'success' }
-      } catch (err) {
-        ztoolkit.log(`Error getting citation count from INSPIRE for ${identifier.type} ID ${identifier.id}:`, err)
+      if (status === 0) {
+        ztoolkit.log(`INSPIRE request for ${identifier.type} ID ${identifier.id} failed:`, error)
         sawApiError = true
+        continue
       }
+      if (status === 404) {
+        sawNotFound = true
+        continue
+      }
+      if (status === 429) {
+        RateLimitManager.handleRateLimit('inspire')
+        return { count: -1, status: 'rate_limited', message: 'API rate limit exceeded' }
+      }
+      if (status < 200 || status >= 300) {
+        sawApiError = true
+        continue
+      }
+
+      const count = parseCount(data?.metadata?.citation_count)
+      if (count === null) {
+        sawApiError = true
+        continue
+      }
+
+      RateLimitManager.handleSuccess('inspire')
+      return { count, status: 'success' }
     }
 
     if (!sawIdentifier) {
@@ -988,44 +993,35 @@ class DBInterface {
       await RateLimitManager.waitForRateLimit('semanticscholar', reporter)
       reporter?.(queryStepText('semanticscholar'))
 
-      try {
-        const url = `https://api.semanticscholar.org/graph/v1/paper/${apiPath}?fields=citationCount`
-        const fetchResponse = await fetchWithTimeout(url)
+      const url = `https://api.semanticscholar.org/graph/v1/paper/${apiPath}?fields=citationCount`
+      const { status, data, error } = await getJson(url)
 
-        if (fetchResponse.status === 404) {
-          sawNotFound = true
-          continue
-        }
-        if (fetchResponse.status === 429) {
-          RateLimitManager.handleRateLimit('semanticscholar')
-          return { count: -1, status: 'rate_limited', message: 'API rate limit exceeded' }
-        }
-        if (!fetchResponse.ok) {
-          sawApiError = true
-          continue
-        }
-
-        const response = await readJson(fetchResponse)
-        if (response === null) {
-          sawApiError = true
-          continue
-        }
-
-        const count = parseCount(response?.citationCount)
-        if (count === null) {
-          sawApiError = true
-          continue
-        }
-
-        RateLimitManager.handleSuccess('semanticscholar')
-        return { count, status: 'success' }
-      } catch (err) {
-        ztoolkit.log(
-          `Error getting citation count from Semantic Scholar for ${identifier.type} ID ${identifier.id}:`,
-          err,
-        )
+      if (status === 0) {
+        ztoolkit.log(`Semantic Scholar request for ${identifier.type} ID ${identifier.id} failed:`, error)
         sawApiError = true
+        continue
       }
+      if (status === 404) {
+        sawNotFound = true
+        continue
+      }
+      if (status === 429) {
+        RateLimitManager.handleRateLimit('semanticscholar')
+        return { count: -1, status: 'rate_limited', message: 'API rate limit exceeded' }
+      }
+      if (status < 200 || status >= 300) {
+        sawApiError = true
+        continue
+      }
+
+      const count = parseCount(data?.citationCount)
+      if (count === null) {
+        sawApiError = true
+        continue
+      }
+
+      RateLimitManager.handleSuccess('semanticscholar')
+      return { count, status: 'success' }
     }
 
     if (!sawIdentifier) {
@@ -1066,44 +1062,40 @@ class DBInterface {
     await RateLimitManager.waitForRateLimit('openalex', reporter)
     reporter?.(queryStepText('openalex'))
 
-    try {
-      const url = `https://api.openalex.org/works/https://doi.org/${encodeURIComponent(doi)}?select=cited_by_count,fwci`
-      const fetchResponse = await fetchWithTimeout(url)
+    const url = `https://api.openalex.org/works/https://doi.org/${encodeURIComponent(doi)}?select=cited_by_count,fwci`
+    const { status, data, error } = await getJson(url)
 
-      if (fetchResponse.status === 404) {
-        return { count: 0, status: 'not_found', message: 'DOI not found in OpenAlex' }
-      }
-      if (fetchResponse.status === 429) {
-        RateLimitManager.handleRateLimit('openalex')
-        return { count: -1, status: 'rate_limited', message: 'OpenAlex API rate limit exceeded' }
-      }
-      if (!fetchResponse.ok) {
-        return { count: -1, status: 'api_error', message: `OpenAlex HTTP ${fetchResponse.status}` }
-      }
+    if (status === 0) {
+      return { count: -1, status: 'api_error', message: error || 'OpenAlex request failed' }
+    }
+    if (status === 404) {
+      return { count: 0, status: 'not_found', message: 'DOI not found in OpenAlex' }
+    }
+    if (status === 429) {
+      RateLimitManager.handleRateLimit('openalex')
+      return { count: -1, status: 'rate_limited', message: 'OpenAlex API rate limit exceeded' }
+    }
+    if (status < 200 || status >= 300) {
+      return { count: -1, status: 'api_error', message: `OpenAlex HTTP ${status}` }
+    }
+    if (data === null) {
+      return { count: -1, status: 'api_error', message: 'OpenAlex API response parsing failed' }
+    }
 
-      const response = await readJson(fetchResponse)
-      if (response === null) {
-        return { count: -1, status: 'api_error', message: 'OpenAlex API response parsing failed' }
+    const count = parseCount(data.cited_by_count)
+    const fwciValue = parseCount(data.fwci)
+    if (count === null && fwciValue === null) {
+      if (data.cited_by_count === undefined && data.fwci === undefined) {
+        return { count: 0, status: 'not_found', message: 'No data in OpenAlex response' }
       }
+      return { count: -1, status: 'api_error', message: 'Invalid citation data in OpenAlex response' }
+    }
 
-      const count = parseCount(response.cited_by_count)
-      const fwciValue = parseCount(response.fwci)
-      if (count === null && fwciValue === null) {
-        if (response.cited_by_count === undefined && response.fwci === undefined) {
-          return { count: 0, status: 'not_found', message: 'No data in OpenAlex response' }
-        }
-        return { count: -1, status: 'api_error', message: 'Invalid citation data in OpenAlex response' }
-      }
-
-      RateLimitManager.handleSuccess('openalex')
-      return {
-        count: count ?? 0,
-        status: 'success',
-        fwci: fwciValue ?? undefined,
-      }
-    } catch (err) {
-      ztoolkit.log('Error getting citation count from OpenAlex', err)
-      return { count: -1, status: 'api_error', message: (err as Error).message }
+    RateLimitManager.handleSuccess('openalex')
+    return {
+      count: count ?? 0,
+      status: 'success',
+      fwci: fwciValue ?? undefined,
     }
   }
 }
@@ -2053,7 +2045,8 @@ class UX {
         // Extra text matches the database again.
         for (const { item } of pending.slice(committed)) {
           try {
-            await item.reload([], true)
+            // Restore the Extra text from the database after the failed write.
+            await reloadExtra(item, 'AvgCite debug')
           } catch (reloadError) {
             ztoolkit.log('AvgCite debug - Failed to reload item:', item.id, reloadError)
           }
