@@ -10,6 +10,8 @@ import {
   normalizeDoi,
   parseExtra,
   pickLatestEntry,
+  sortableNumber,
+  sortableNumberToNumber,
   trimExtraHistory,
 } from './citationData'
 import { getJson } from './http'
@@ -28,8 +30,8 @@ const DEFAULT_RATE_LIMITS: Record<string, number> = {
 const MAX_RATE_LIMIT_MULTIPLIER = 10
 
 // Custom columns are sorted by their dataProvider string, so numeric values are
-// zero-padded to a fixed width to make the item tree sort them numerically.
-const SORT_PAD_WIDTH = 12
+// encoded with `sortableNumber` (see citationData.ts) to make the item tree's
+// lexicographic sort match the numeric order.
 
 // Adaptive rate limiting state
 class RateLimitManager {
@@ -467,29 +469,56 @@ function getParsedExtra(item: Zotero.Item): ParsedExtra {
 /**
  * Re-read just the Extra field from the database before writing to it.
  *
- * `extra` is not a Zotero data type — it lives inside `itemData` — so
- * `item.reload(['extra'], true)` silently does nothing, and reloading all of
- * `itemData` would also discard unrelated unsaved edits. Querying the one value
- * keeps the item's other in-memory state intact while still preventing a
- * concurrent plugin write from being overwritten.
+ * The Extra text lives in `itemData` → `itemDataValues`, and `extra` is not a
+ * Zotero data type, so `item.reload(['extra'], true)` silently does nothing.
+ * Reloading the whole `itemData` type would also discard unrelated unsaved
+ * edits, so query the single value instead.
+ *
+ * Returns the stored text, or null when it could not be read (in which case the
+ * caller must keep using the in-memory value rather than treating it as empty).
  */
-async function reloadExtra(item: Zotero.Item, logPrefix: string): Promise<void> {
-  if (!item.id) return
+async function readStoredExtra(item: Zotero.Item, logPrefix: string): Promise<string | null> {
+  if (!item.id) return null
   try {
-    const stored = await Zotero.DB.valueQueryAsync<string>(
-      `SELECT id.value FROM itemData id
-         JOIN fields f ON f.fieldID = id.fieldID
-        WHERE id.itemID = ? AND f.fieldName = 'extra'`,
-      [item.id],
+    const extraFieldID = Zotero.ItemFields.getID('extra')
+    if (!extraFieldID) return null
+    const value = await Zotero.DB.valueQueryAsync<string>(
+      'SELECT IDV.value FROM itemData ID JOIN itemDataValues IDV ON IDV.valueID = ID.valueID' +
+        ' WHERE ID.itemID = ? AND ID.fieldID = ?',
+      [item.id, extraFieldID],
     )
-    const value = typeof stored === 'string' ? stored : ''
-    if (value !== (item.getField('extra') || '')) {
-      item.setField('extra', value)
-    }
+    // `false` means the row does not exist, i.e. Extra is empty.
+    if (value === false || value === undefined || value === null) return ''
+    return typeof value === 'string' ? value : String(value)
   } catch (e) {
-    // The item may have been deleted while the request was in flight.
-    ztoolkit.log(`${logPrefix} - Could not reload Extra before writing:`, e)
+    ztoolkit.log(`${logPrefix} - Could not read the stored Extra value:`, e)
+    return null
   }
+}
+
+/**
+ * Return the Extra text to base a write on, refreshed from the database so a
+ * write from another run or window is not overwritten.
+ *
+ * The value is read without touching the item. When the item already has
+ * unsaved changes the in-memory text is newer than the database, so it wins —
+ * assigning the stored value would discard the user's edit. (`hasChanged()` is
+ * item-wide, so this is deliberately conservative: it may skip a refresh when
+ * only an unrelated field is dirty.)
+ */
+async function extraForWrite(item: Zotero.Item, logPrefix: string): Promise<string> {
+  const current = item.getField('extra') || ''
+
+  let hasPendingChanges = false
+  try {
+    hasPendingChanges = item.hasChanged()
+  } catch {
+    hasPendingChanges = false
+  }
+  if (hasPendingChanges) return current
+
+  const stored = await readStoredExtra(item, logPrefix)
+  return stored === null ? current : stored
 }
 
 class Core {
@@ -508,9 +537,8 @@ class Core {
 
       // Re-read under the lock. Another run may have written since the caller
       // fetched this item.
-      await reloadExtra(item, 'Citation debug')
+      const extra = await extraForWrite(item, 'Citation debug')
 
-      const extra = item.getField('extra') || ''
       ztoolkit.log('Citation debug - Setting citation count for item:', item.id, 'count:', data)
 
       const extras = extra.split('\n')
@@ -653,10 +681,11 @@ class Core {
    * data was fetched), not the current date — this keeps the metric stable and meaningful
    * even if the user recomputes it long after fetching.
    * @param item Zotero item
+   * @param extraOverride Extra text to use instead of the item's in-memory value
    * @returns the new Extra entry, or null if it cannot/should not be computed
    */
-  static computeAvgCiteEntry(item: Zotero.Item): string | null {
-    const extra = item.getField('extra') || ''
+  static computeAvgCiteEntry(item: Zotero.Item, extraOverride?: string): string | null {
+    const extra = extraOverride ?? (item.getField('extra') || '')
     const citationInfo = Core.findLatestCitationFromExtra(extra)
     if (!citationInfo) {
       ztoolkit.log('AvgCite debug - No citation data found for item:', item.id)
@@ -725,8 +754,7 @@ class Core {
   static async storeAvgCiteEntry(item: Zotero.Item, newEntry: string): Promise<void> {
     // The batch path computes entries before it writes. Re-read here so a
     // citation update that landed in between is not overwritten.
-    await reloadExtra(item, 'AvgCite debug')
-    const extra = item.getField('extra') || ''
+    const extra = await extraForWrite(item, 'AvgCite debug')
     const extras = extra.split('\n')
     if (extras.includes(newEntry)) return
 
@@ -754,8 +782,8 @@ class Core {
     return withExtraWriteLock(async () => {
       if (!addon.data.alive) return false
       onStep?.(getString('progress-step-avgcite-reading'))
-      await reloadExtra(item, 'AvgCite debug')
-      const newEntry = Core.computeAvgCiteEntry(item)
+      const extra = await extraForWrite(item, 'AvgCite debug')
+      const newEntry = Core.computeAvgCiteEntry(item, extra)
       if (newEntry === null) return false
 
       onStep?.(getString('progress-step-saving'))
@@ -1111,20 +1139,41 @@ const notifierCallback = {
         return
       }
 
-      const items = ids
-        .map((id) => Zotero.Items.get(id as number))
-        .filter((item) => !item.isFeedItem && item.isRegularItem())
-      if (items.length > 0) {
-        ztoolkit.log(
-          'New regular items added with IDs:',
-          items.map((item) => item.id),
-        )
-        // Do not go through `updateItems`: that resets the shared manual queue
-        // and would cancel an update the user explicitly started.
-        void updateNewItemsSilently(items)
-      }
+      // Handle asynchronously: at 'add' time the item is registered but its data
+      // is frequently not loaded yet, and `Items.get()` throws
+      // UnloadedDataException for such an id. Resolving through getAsync after
+      // yielding avoids that and also keeps the notifier callback fast.
+      void fetchOnAddItems(ids.map((id) => Number(id))).catch((e) => ztoolkit.log('Fetch on add failed:', e))
     }
   },
+}
+
+async function fetchOnAddItems(ids: number[]): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  if (!addon.data.alive) return
+
+  const items: Zotero.Item[] = []
+  for (const id of ids) {
+    if (!addon.data.alive) return
+    try {
+      const item = await Zotero.Items.getAsync(id)
+      if (item && !item.isFeedItem && item.isRegularItem()) {
+        items.push(item)
+      }
+    } catch (e) {
+      // The item may have been removed again before we looked at it.
+      ztoolkit.log('Fetch on add: could not load item', id, e)
+    }
+  }
+
+  if (items.length === 0) return
+  ztoolkit.log(
+    'New regular items added with IDs:',
+    items.map((item) => item.id),
+  )
+  // Do not go through `updateItems`: that resets the shared manual queue
+  // and would cancel an update the user explicitly started.
+  await updateNewItemsSilently(items)
 }
 
 async function updateNewItemsSilently(items: Zotero.Item[]): Promise<void> {
@@ -1439,9 +1488,11 @@ async function updateItem(
     ztoolkit.log('Error updating citation count for item', e)
     outcome.transient = true
   } finally {
-    // Process next item in the manual queue
+    // Process next item in the manual queue. Deferred by a macrotask rather
+    // than called inline: a run where every item fails synchronously would
+    // otherwise recurse without ever yielding.
     if (advanceQueue) {
-      void updateNextItem(operations, silent, runToken)
+      setTimeout(() => void updateNextItem(operations, silent, runToken), 0)
     }
   }
 
@@ -1488,9 +1539,9 @@ class UIRegistrar {
           if (!result) {
             return ''
           }
-          // Zero-pad the counts so the tree's string-based sort is numeric;
-          // renderCell strips the padding for display.
-          const counts = result.counts.map((count) => (count === '-' ? count : count.padStart(SORT_PAD_WIDTH, '0')))
+          // Encode each count so the tree's string sort is numeric;
+          // renderCell decodes it for display.
+          const counts = result.counts.map((count) => sortableNumber(count))
           return JSON.stringify({ counts, databases: result.databases })
         },
         // iconPath: 'chrome://zotero/skin/citations.png',
@@ -1499,12 +1550,25 @@ class UIRegistrar {
           span.className = `cell ${column.className}`
           span.style.textAlign = 'center'
 
-          // Parse JSON data if it's a string
+          // Parse JSON data if it's a string. Validate the shape: a stale or
+          // hand-edited value would otherwise throw inside the renderer and
+          // break the whole column.
           let parsedData: { counts: string[]; databases: string[] } | null = null
           if (data && typeof data === 'string') {
             try {
-              parsedData = JSON.parse(data)
-            } catch (e) {
+              const candidate = JSON.parse(data)
+              if (
+                candidate &&
+                Array.isArray(candidate.counts) &&
+                Array.isArray(candidate.databases) &&
+                candidate.counts.length === candidate.databases.length
+              ) {
+                parsedData = candidate
+              } else {
+                span.innerText = data
+                return span
+              }
+            } catch {
               // Display as text if JSON parsing fails
               span.innerText = data
               return span
@@ -1522,10 +1586,11 @@ class UIRegistrar {
           // invisible on a dark background.
           const fallbackColor = isLightMode() ? '#000000' : '#ffffff'
 
-          // Strip the zero-padding used for sorting before displaying
-          const displayCounts = dataToUse.counts.map((count: string) =>
-            count === '-' ? count : String(parseInt(count, 10)),
-          )
+          // Decode the sortable encoding back to the displayed integer count.
+          const displayCounts = dataToUse.counts.map((count: string) => {
+            const numeric = sortableNumberToNumber(count)
+            return numeric === null ? count : String(numeric)
+          })
 
           displayCounts.forEach((count: string, idx: number) => {
             if (idx > 0) {
@@ -1577,14 +1642,14 @@ class UIRegistrar {
         zoteroPersist: ['width', 'ordinal', 'hidden', 'sortDirection'],
         dataProvider: (item: Zotero.Item) => {
           const value = Core.getFWCIForColumn(item)
-          return value === '-' ? '-' : value.padStart(SORT_PAD_WIDTH, '0')
+          return sortableNumber(value)
         },
         renderCell(index, data: any, column, isFirstColumn, doc) {
           const span = doc.createElement('span')
           span.className = `cell ${column.className}`
           span.style.textAlign = 'center'
-          const num = parseFloat(data)
-          span.innerText = data && !isNaN(num) ? num.toFixed(2) : '-'
+          const value = sortableNumberToNumber(typeof data === 'string' ? data : '')
+          span.innerText = value === null ? '-' : value.toFixed(2)
           return span
         },
       })
@@ -1609,14 +1674,14 @@ class UIRegistrar {
         zoteroPersist: ['width', 'ordinal', 'hidden', 'sortDirection'],
         dataProvider: (item: Zotero.Item) => {
           const value = Core.getAvgCiteForColumn(item)
-          return value === '-' ? '-' : value.padStart(SORT_PAD_WIDTH, '0')
+          return sortableNumber(value)
         },
         renderCell(index, data: any, column, isFirstColumn, doc) {
           const span = doc.createElement('span')
           span.className = `cell ${column.className}`
           span.style.textAlign = 'center'
-          const num = parseFloat(data)
-          span.innerText = data && !isNaN(num) ? num.toFixed(2) : '-'
+          const value = sortableNumberToNumber(typeof data === 'string' ? data : '')
+          span.innerText = value === null ? '-' : value.toFixed(2)
           return span
         },
       })
@@ -1993,7 +2058,10 @@ class UX {
       // Let the window actually paint this item's lines before doing the work.
       await yieldToUI()
 
-      const entry = Core.computeAvgCiteEntry(item)
+      // Compute from the text that the write will actually use, so a stale
+      // in-memory Extra cannot produce an entry based on outdated citations.
+      const baseExtra = await extraForWrite(item, 'AvgCite debug')
+      const entry = Core.computeAvgCiteEntry(item, baseExtra)
       if (entry) pending.push({ item, entry })
     }
 
@@ -2045,8 +2113,12 @@ class UX {
         // Extra text matches the database again.
         for (const { item } of pending.slice(committed)) {
           try {
-            // Restore the Extra text from the database after the failed write.
-            await reloadExtra(item, 'AvgCite debug')
+            // The failed chunk was rolled back, so the database still holds the
+            // previous Extra text. Restore it for the following chunks too: they
+            // were never written, but their in-memory Extra may already carry a
+            // pending modification from a previous failed attempt.
+            const stored = await readStoredExtra(item, 'AvgCite debug')
+            if (stored !== null) item.setField('extra', stored)
           } catch (reloadError) {
             ztoolkit.log('AvgCite debug - Failed to reload item:', item.id, reloadError)
           }

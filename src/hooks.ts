@@ -154,8 +154,10 @@ async function onMainWindowLoad(win: _ZoteroTypes.MainWindow): Promise<void> {
 
 async function onMainWindowUnload(win: Window): Promise<void> {
   try {
-    ztoolkit.unregisterAll()
-    // Only this window is going away; other windows still need their menus.
+    // Only clean up what belongs to this window. `ztoolkit.unregisterAll()`
+    // removes every cached element across all windows, which would strip the
+    // menus from windows that are still open. Zotero 8+ menu registrations are
+    // owned by Zotero and removed automatically.
     UIRegistrar.unregisterZotero7Menus(win)
     addon.data.dialog?.window?.close()
   } catch (e) {

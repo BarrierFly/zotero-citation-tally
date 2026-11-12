@@ -191,13 +191,18 @@ and `structuredClone` are **not** available there. Referencing them throws a
 `ReferenceError` inside the plugin at runtime, while `tsc` and the unit tests
 still pass because Node provides them.
 
-`test/sandboxGlobals.test.ts` guards against this class of bug. Use
-`src/modules/http.ts` (`getJson`) for API calls: it goes through
-`Zotero.HTTP.request`, which provides real timeouts and honours the user's proxy
-configuration.
+`test/sandboxGlobals.test.ts` scans every file under `src/` for these globals and
+fails the build if one is used outside a comment. Use `src/modules/http.ts`
+(`getJson`) for API calls: it goes through `Zotero.HTTP.request`, which provides
+real timeouts and honours the user's proxy configuration.
 
-Note also that `extra` is not a Zotero data type. Use the `reloadExtra` helper
-instead of `item.reload(['extra'], …)`, which silently does nothing.
+Two related Zotero API rules the plugin depends on:
+
+- `extra` is **not** a Zotero data type. `item.reload(['extra'], …)` silently
+  does nothing, so writes re-read the stored value through `extraForWrite`.
+- `Zotero.Items.get()` throws `UnloadedDataException` for an item that is
+  registered but not yet loaded, which is the normal state inside an `add`
+  notifier event. Use `Zotero.Items.getAsync()` there.
 
 ## Related Projects
 

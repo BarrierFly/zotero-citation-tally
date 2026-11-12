@@ -405,6 +405,59 @@ export function formatDate(date: Date = new Date()): string {
 }
 
 /**
+ * Width used to zero-pad numbers shown in custom columns. The item tree sorts
+ * column data as strings, so the padding is what makes the sort numeric.
+ */
+export const SORT_PAD_WIDTH = 12
+
+/**
+ * Encode a displayed numeric value so the item tree's lexicographic sort
+ * matches the numeric order.
+ *
+ * Values are scaled to hundredths and zero-padded to a fixed width, so the
+ * string length is constant and compares like a number. Padding the literal
+ * text instead would break as soon as the integer parts differ in length
+ * (`"2.50"` vs `"10.00"`), which is the normal case for FWCI and AvgCite.
+ *
+ * Negative values are complemented so that a larger magnitude gives a smaller
+ * key (-12 before -2), and prefixed with '-', which sorts before every digit.
+ */
+export function sortableNumber(value: string): string {
+  if (value === '-') return '-'
+  if (!value || !value.trim()) return '-'
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return '-'
+
+  const scaled = Math.round(Math.abs(numeric) * 100)
+  const limit = 10 ** SORT_PAD_WIDTH
+  // Very large values cannot be represented at this resolution; fall back to
+  // the placeholder rather than emitting a key of the wrong width, which would
+  // silently corrupt the sort order.
+  if (!Number.isFinite(scaled) || scaled >= limit) return '-'
+
+  const key = numeric < 0 ? limit - scaled : scaled
+  return `${numeric < 0 ? '-' : ''}${String(key).padStart(SORT_PAD_WIDTH, '0')}`
+}
+
+/**
+ * Inverse of {@link sortableNumber}. Returns null for the placeholder or any
+ * value that was not produced by it, so callers can fall back to raw text.
+ */
+export function sortableNumberToNumber(encoded: string): number | null {
+  if (!encoded || encoded === '-') return null
+  const negative = encoded.startsWith('-')
+  const digits = negative ? encoded.slice(1) : encoded
+  if (!/^\d+$/.test(digits) || digits.length !== SORT_PAD_WIDTH) return null
+
+  const key = Number(digits)
+  const limit = 10 ** SORT_PAD_WIDTH
+  const scaled = negative ? limit - key : key
+  if (!Number.isFinite(scaled)) return null
+  const value = scaled / 100
+  return negative ? -value : value
+}
+
+/**
  * Number of consecutive failed automatic lookups before an item is considered
  * blocked for a database.
  */

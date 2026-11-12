@@ -117,10 +117,10 @@ async function collectLibraryItemIds(): Promise<number[]> {
   const ids: number[] = []
 
   for (const library of Zotero.Libraries.getAll()) {
+    // Feed libraries contain no fetchable items.
     if (library.libraryType === 'feed') continue
     try {
-      const search = new Zotero.Search()
-      ;(search as unknown as { libraryID: number }).libraryID = library.libraryID
+      const search = new Zotero.Search({ libraryID: library.libraryID })
       search.addCondition('deleted', 'false', '')
       search.addCondition('itemType', 'isNot', 'attachment')
       search.addCondition('itemType', 'isNot', 'note')
