@@ -411,6 +411,16 @@ export function formatDate(date: Date = new Date()): string {
 export const SORT_PAD_WIDTH = 12
 
 /**
+ * Sort key for "no value".
+ *
+ * Zotero's locale collation places `-` before every digit (measured on 7.0.32
+ * and 10.0.6), so the old `-` placeholder sorted *above* every real value in an
+ * ascending sort. Zotero's built-in columns put rows without a value last, which
+ * needs a key that compares after digits; `z` does in every locale we tested.
+ */
+export const SORT_EMPTY_KEY = 'z'.repeat(SORT_PAD_WIDTH)
+
+/**
  * Encode a displayed numeric value so the item tree's lexicographic sort
  * matches the numeric order.
  *
@@ -423,20 +433,24 @@ export const SORT_PAD_WIDTH = 12
  * key (-12 before -2), and prefixed with '-', which sorts before every digit.
  */
 export function sortableNumber(value: string): string {
-  if (value === '-') return '-'
-  if (!value || !value.trim()) return '-'
+  if (value === '-') return SORT_EMPTY_KEY
+  if (!value || !value.trim()) return SORT_EMPTY_KEY
   const numeric = Number(value)
-  if (!Number.isFinite(numeric)) return '-'
+  if (!Number.isFinite(numeric)) return SORT_EMPTY_KEY
 
   const scaled = Math.round(Math.abs(numeric) * 100)
   const limit = 10 ** SORT_PAD_WIDTH
   // Very large values cannot be represented at this resolution; fall back to
   // the placeholder rather than emitting a key of the wrong width, which would
   // silently corrupt the sort order.
-  if (!Number.isFinite(scaled) || scaled >= limit) return '-'
+  if (!Number.isFinite(scaled) || scaled >= limit) return SORT_EMPTY_KEY
 
-  const key = numeric < 0 ? limit - scaled : scaled
-  return `${numeric < 0 ? '-' : ''}${String(key).padStart(SORT_PAD_WIDTH, '0')}`
+  // `scaled === 0` covers values that round to zero (e.g. -0.001). Using the
+  // complement for those would produce `limit` itself, one digit wider than
+  // every other key, which sorts after all positive values.
+  const negative = numeric < 0 && scaled > 0
+  const key = negative ? limit - scaled : scaled
+  return `${negative ? '-' : ''}${String(key).padStart(SORT_PAD_WIDTH, '0')}`
 }
 
 /**
@@ -444,7 +458,7 @@ export function sortableNumber(value: string): string {
  * value that was not produced by it, so callers can fall back to raw text.
  */
 export function sortableNumberToNumber(encoded: string): number | null {
-  if (!encoded || encoded === '-') return null
+  if (!encoded || encoded === SORT_EMPTY_KEY) return null
   const negative = encoded.startsWith('-')
   const digits = negative ? encoded.slice(1) : encoded
   if (!/^\d+$/.test(digits) || digits.length !== SORT_PAD_WIDTH) return null
@@ -453,8 +467,54 @@ export function sortableNumberToNumber(encoded: string): number | null {
   const limit = 10 ** SORT_PAD_WIDTH
   const scaled = negative ? limit - key : key
   if (!Number.isFinite(scaled)) return null
+  // `sortableNumber` writes zero as a plain `0` key, never as a complement.
+  if (negative && scaled === limit) return null
   const value = scaled / 100
   return negative ? -value : value
+}
+
+/**
+ * Build a Semantic Scholar paper path for an arXiv ID.
+ *
+ * Old-style IDs (`hep-th/9901001`) must keep their literal slash: the
+ * percent-encoded form `arXiv:hep-th%2F9901001` is answered with `429 Too Many
+ * Requests` for every ID, valid or not, so encoding it silently made all
+ * old-style arXiv papers unfetchable. New-style IDs contain no slash.
+ */
+export function semanticScholarArxivPath(arxivId: string): string {
+  return `arXiv:${encodeURIComponent(arxivId).replace(/%2F/gi, '/')}`
+}
+
+/**
+ * Map Zotero's `browser.theme.toolbar-theme` preference to a light/dark answer.
+ *
+ * Zotero's own Appearance pane binds this preference to a "Color Scheme" radio
+ * group in `preferences_general.xhtml`:
+ *
+ * ```text
+ * value 2 = Automatic, value 1 = Light, value 0 = Dark
+ * ```
+ *
+ * `0` is Dark, not Light — inverting these two made the plugin pick colors for
+ * the wrong theme. Returns `null` for Automatic/unset so the caller can fall
+ * back to the actual platform preference.
+ */
+export function colorSchemePrefToLightMode(value: unknown): boolean | null {
+  // `Number(null)` and `Number('')` are both 0, which would silently mean
+  // "Dark"; only accept real numbers and non-empty numeric strings.
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return null
+    if (value === 1) return true
+    if (value === 0) return false
+    return null
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    const numeric = Number(value)
+    if (!Number.isFinite(numeric)) return null
+    if (numeric === 1) return true
+    if (numeric === 0) return false
+  }
+  return null
 }
 
 /**

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  colorSchemePrefToLightMode,
   extractIdentifiers,
   formatDate,
   normalizeArxivId,
@@ -10,9 +11,28 @@ import {
   parseExtra,
   pickLatestEntry,
   requiredRetryDays,
+  semanticScholarArxivPath,
   shouldRetryAfter,
   trimExtraHistory,
 } from '../src/modules/citationData.ts'
+
+test('semanticScholarArxivPath keeps the slash in old-style IDs', () => {
+  // Percent-encoding it yields HTTP 429 for every ID, so the slash must stay.
+  assert.equal(semanticScholarArxivPath('hep-th/9901001'), 'arXiv:hep-th/9901001')
+  assert.equal(semanticScholarArxivPath('2201.02177'), 'arXiv:2201.02177')
+  // No other characters may leak through unencoded.
+  assert.equal(semanticScholarArxivPath('hep-th/9901001v2'), 'arXiv:hep-th/9901001v2')
+})
+
+test('colorSchemePrefToLightMode follows Zotero preference values', () => {
+  // Zotero's Appearance pane: 0 = Dark, 1 = Light, 2 = Automatic.
+  assert.equal(colorSchemePrefToLightMode(0), false)
+  assert.equal(colorSchemePrefToLightMode(1), true)
+  assert.equal(colorSchemePrefToLightMode(2), null)
+  assert.equal(colorSchemePrefToLightMode('1'), true)
+  assert.equal(colorSchemePrefToLightMode(undefined), null)
+  assert.equal(colorSchemePrefToLightMode(null), null)
+})
 
 test('normalizeDatabaseName accepts legacy spellings', () => {
   assert.equal(normalizeDatabaseName('Crossref'), 'crossref')

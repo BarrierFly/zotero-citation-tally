@@ -2,7 +2,7 @@
 
 # Citation Tally
 
-[![zotero target version](https://img.shields.io/badge/Zotero-7%20%7C%208%20%7C%209-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org) [![Using Zotero Plugin Template](https://img.shields.io/badge/Using-Zotero%20Plugin%20Template-blue?style=flat-square&logo=github)](https://github.com/windingwind/zotero-plugin-template)
+[![zotero target version](https://img.shields.io/badge/Zotero-7%20%7C%208%20%7C%209%20%7C%2010-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org) [![Using Zotero Plugin Template](https://img.shields.io/badge/Using-Zotero%20Plugin%20Template-blue?style=flat-square&logo=github)](https://github.com/windingwind/zotero-plugin-template)
 
 **_Displays citation counts, FWCI, and average citations per year for Zotero library items._**
 
@@ -203,6 +203,48 @@ Two related Zotero API rules the plugin depends on:
 - `Zotero.Items.get()` throws `UnloadedDataException` for an item that is
   registered but not yet loaded, which is the normal state inside an `add`
   notifier event. Use `Zotero.Items.getAsync()` there.
+
+### Loading item data
+
+`Zotero.Items.getAsync()` only loads `primaryData`. Calling `getField('DOI')`,
+`getField('extra')` or `getField('dateAdded')` on the returned item throws
+`UnloadedDataException` until `itemData` is loaded, so every code path that reads
+fields from freshly loaded items calls
+`Zotero.Items.loadDataTypes(items, ['itemData'])` first. This affects the library
+scan, fetch-on-add and the outdated-source check; without it those paths fail
+silently and no citations are ever fetched.
+
+### Public API for automation
+
+`Zotero.CitationTally.api` exposes the pure helpers and the update entry points,
+so scripts and other plugins can drive the plugin without copying its logic:
+
+```js
+const { api } = Zotero.CitationTally
+
+// Column values for an item whose itemData is loaded
+api.core.getCitationCountForColumn(item)
+
+// Identifiers, including arXiv IDs parsed from Extra/URL/archiveID
+api.core.getIdentifiers(item)
+
+// One-off lookup against a single database (no writes)
+await api.databases.lookup('openalex', item)
+
+// Full update of one item, same code path as the context menu
+await api.items.updateItem(item, ['crossref'])
+
+// The Tools-menu retally, run silently
+await api.scan.retallyOutdated()
+```
+
+### Column sorting
+
+The item tree sorts custom columns by comparing the `dataProvider` strings with
+Zotero's locale collation. Numbers are therefore encoded as fixed-width,
+hundredths-scaled keys, and missing values use a key that sorts _after_ every
+number (Zotero's own convention for rows without a value). Both behaviours are
+covered by `test/sortableNumber.test.ts` against `Intl.Collator`.
 
 ## Related Projects
 

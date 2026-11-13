@@ -76,14 +76,13 @@ export default zotero({
       rules: {
         'import/no-unresolved': 'error',
         'import/namespace': 'off',
-        'import/order': [
-          'error',
-          {
-            'groups': ['builtin', 'external', 'internal', 'parent', 'sibling', 'index', 'type', 'object', 'unknown'],
-            'newlines-between': 'always',
-            'alphabetize': { order: 'asc', caseInsensitive: true },
-          },
-        ],
+        // `eslint-plugin-import` 2.x declares support for ESLint <= 9. Under
+        // ESLint 10 its `import/order` rule throws
+        // `sourceCode.getTokenOrCommentBefore is not a function` as soon as it
+        // has an out-of-order import to report, which aborts the whole lint run.
+        // Keep the rule off until the plugin (or the import-x fork) supports
+        // ESLint 10; `sort-imports` below still enforces member ordering.
+        'import/order': 'off',
         'sort-imports': [
           'error',
           {

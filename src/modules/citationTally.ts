@@ -2,6 +2,7 @@ import { getLocaleID, getString } from '../utils/locale'
 import { getPref } from '../utils/prefs'
 
 import {
+  colorSchemePrefToLightMode,
   DATABASE_IDS,
   DATABASE_STORAGE_NAMES,
   extractIdentifiers,
@@ -10,6 +11,8 @@ import {
   normalizeDoi,
   parseExtra,
   pickLatestEntry,
+  semanticScholarArxivPath,
+  SORT_EMPTY_KEY,
   sortableNumber,
   sortableNumberToNumber,
   trimExtraHistory,
@@ -99,7 +102,7 @@ class RateLimitManager {
 
 // Citation source operations
 
-interface LookupResult {
+export interface LookupResult {
   count: number
   status: 'success' | 'not_found' | 'api_error' | 'no_identifier' | 'rate_limited'
   message?: string
@@ -228,18 +231,11 @@ const databaseColorsLight: Record<string, string> = {
  */
 function isLightMode(): boolean {
   try {
-    // Zotero's color scheme follows Firefox's toolbar-theme pref:
-    // 0 = light, 1 = dark, 2 = follow the system
     const toolbarTheme = Zotero.Prefs.get('browser.theme.toolbar-theme', true) as number | undefined
+    const fromPref = colorSchemePrefToLightMode(toolbarTheme)
+    if (fromPref !== null) return fromPref
 
-    if (toolbarTheme === 0) {
-      return true
-    }
-    if (toolbarTheme === 1) {
-      return false
-    }
-
-    // 'auto' or unset: check system preference
+    // 'auto' (2) or unset: follow the system preference.
     const win = Zotero.getMainWindow()
     if (win) {
       const mediaQuery = win.matchMedia?.('(prefers-color-scheme: dark)')
@@ -994,7 +990,7 @@ class DBInterface {
       let apiPath: string
 
       if (identifier.type === 'arxiv') {
-        apiPath = `arXiv:${encodeURIComponent(identifier.id)}`
+        apiPath = semanticScholarArxivPath(identifier.id)
       } else {
         const doi = normalizeDoi(identifier.id)
         if (!doi) {
@@ -1010,7 +1006,7 @@ class DBInterface {
             sawApiError = true
             continue
           }
-          apiPath = `arXiv:${encodeURIComponent(arxivId)}`
+          apiPath = semanticScholarArxivPath(arxivId)
         } else {
           // Keep the DOI slash readable; encode everything else.
           apiPath = encodeURIComponent(doi).replace(/%2F/gi, '/')
@@ -1167,6 +1163,13 @@ async function fetchOnAddItems(ids: number[]): Promise<void> {
   }
 
   if (items.length === 0) return
+  // `Items.getAsync()` only loads primaryData; the identifier lookup reads
+  // DOI/extra and would otherwise throw UnloadedDataException.
+  try {
+    await Zotero.Items.loadDataTypes(items, ['itemData'])
+  } catch (e) {
+    ztoolkit.log('Fetch on add: could not load item data:', e)
+  }
   ztoolkit.log(
     'New regular items added with IDs:',
     items.map((item) => item.id),
@@ -1288,13 +1291,16 @@ function updateItems(items: Zotero.Item[], operations?: string[] | string, silen
 
   if (regularItems.length === 0) {
     if (!silent) {
-      // Show message if no regular items are selected
-      new ztoolkit.ProgressWindow('Citation Counts', {
+      // Show message if no regular items are selected. `ProgressWindow` only
+      // knows the `success`/`fail` icon keys; `error` silently renders no icon.
+      const emptyWindow = new ztoolkit.ProgressWindow(addon.data.config.addonName, {
         closeOnClick: true,
+        closeTime: 3000,
       })
+      emptyWindow
         .createLine({
           text: getString('progress-no-valid-items'),
-          type: 'error',
+          type: 'fail',
         })
         .show()
         .startCloseTimer(3000)
@@ -1514,6 +1520,21 @@ class BasicRegistrar {
   }
 }
 
+// Menu icons must exist in every supported Zotero version. Zotero 7 only ships
+// `chrome://zotero/skin/tick.png`, Zotero 10 only ships
+// `chrome://zotero/skin/16/universal/tick.svg`; there is no shared path. The
+// versioned SVG is used on 10, and no icon is set on 7 (an icon that does not
+// resolve renders as an empty image there).
+function getCitationMenuIcon(): string {
+  try {
+    const major = Number((Zotero as any).platformMajorVersion)
+    if (major >= 140) return 'chrome://zotero/skin/16/universal/crossref.svg'
+  } catch {
+    // Fall through to "no icon"
+  }
+  return ''
+}
+
 // MenuManager registrations are global, not per window. Registering the same
 // menu IDs again for every window throws on some Zotero versions.
 let citationMenuManagerRegistered = false
@@ -1587,9 +1608,11 @@ class UIRegistrar {
           const fallbackColor = isLightMode() ? '#000000' : '#ffffff'
 
           // Decode the sortable encoding back to the displayed integer count.
+          // A missing count keeps the dash placeholder rather than the raw key.
           const displayCounts = dataToUse.counts.map((count: string) => {
             const numeric = sortableNumberToNumber(count)
-            return numeric === null ? count : String(numeric)
+            if (numeric !== null) return String(numeric)
+            return count === SORT_EMPTY_KEY ? '-' : count
           })
 
           displayCounts.forEach((count: string, idx: number) => {
@@ -1755,7 +1778,9 @@ class UIRegistrar {
           {
             menuType: 'menuitem',
             l10nID: getLocaleID('menuitem-update-citation-tallies'),
-            icon: 'chrome://zotero/skin/toolbar-advanced-search.png',
+            // `chrome://zotero/skin/toolbar-advanced-search.png` does not exist
+            // in Zotero 7-10; only the versioned icon directories ship.
+            ...(getCitationMenuIcon() ? { icon: getCitationMenuIcon() } : {}),
             onShowing,
             onCommand: () => addon.hooks.onDialogEvents('updateCitationCounts'),
           },
@@ -2020,7 +2045,7 @@ class UX {
       })
         .createLine({
           text: getString('progress-no-valid-items'),
-          type: 'error',
+          type: 'fail',
         })
         .show()
         .startCloseTimer(3000)
@@ -2146,7 +2171,7 @@ class UX {
   }
 }
 
-// Export functions needed by autoupdate module
+// Export functions needed by autoupdate module and by the public API
 export type { StepReporter }
 export {
   DBInterface,

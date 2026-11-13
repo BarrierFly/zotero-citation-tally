@@ -1,6 +1,7 @@
 import { config } from '../package.json'
 
 import hooks from './hooks'
+import { api } from './modules/api'
 import { createZToolkit } from './utils/ztoolkit'
 
 import type { ColumnOptions, DialogHelper } from 'zotero-plugin-toolkit'
@@ -26,7 +27,7 @@ class Addon {
   // Lifecycle hooks
   public hooks: typeof hooks
   // APIs
-  public api: object
+  public api: typeof api
 
   constructor() {
     this.data = {
@@ -37,7 +38,7 @@ class Addon {
       ztoolkit: createZToolkit(),
     }
     this.hooks = hooks
-    this.api = {}
+    this.api = api
   }
 }
 

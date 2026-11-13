@@ -153,6 +153,11 @@ async function getItemsNeedingUpdate(): Promise<OutdatedItem[]> {
     const chunk = itemIds.slice(start, start + SCAN_CHUNK_SIZE)
     const items = await Zotero.Items.getAsync(chunk)
 
+    // `Items.getAsync()` only loads primaryData. Reading `DOI`, `extra` or
+    // `dateAdded` before itemData is loaded throws UnloadedDataException, and
+    // the identifier extraction below reads exactly those fields.
+    await Zotero.Items.loadDataTypes(items, ['itemData'])
+
     for (const item of items) {
       if (!item.isRegularItem()) continue
       regularItemCount++
